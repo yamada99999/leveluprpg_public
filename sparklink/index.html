@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#070a15">
+  <meta property="og:title" content="⚡ スパークリンクで対戦しよう">
+  <meta property="og:description" content="URLを開いて名前を入れたら「参加する」を押すだけ。線をつないで電気を通す2人対戦ゲーム">
+  <title>スパークリンク</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <!-- フォントは後から読み込む（電波が弱くても画面がすぐ出るように。オフラインなら端末のフォントで表示） -->
+  <link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="app"></main>
+  <div id="toast" class="toast" hidden></div>
+  <div class="volume">
+    <button id="muteBtn" class="vol-btn" data-act="mute" aria-label="BGMのオン/オフ">🔊</button>
+    <input id="volume" type="range" min="0" max="100" step="1" aria-label="BGMの音量">
+  </div>
+
+  <div id="rules" class="modal" hidden>
+    <div class="modal-box rules">
+      <button class="modal-close" data-act="closeRules" aria-label="閉じる">×</button>
+      <h2>⚡ スパークリンクの遊び方</h2>
+      <p class="lead">2人対戦・運の要素なし。電線をつないで、先に向こう岸まで電気を通した方の勝ち！</p>
+
+      <h3>目的</h3>
+      <ul>
+        <li><b class="red">赤</b>：上のラインと下のラインをつなぐ</li>
+        <li><b class="blue">青</b>：左のラインと右のラインをつなぐ</li>
+      </ul>
+
+      <h3>手番</h3>
+      <ul>
+        <li>赤が先手。交互に1本ずつ線を引きます。</li>
+        <li>自分の色の点から、<b>縦か横の隣にある自分の色の点</b>へドラッグして線を引きます（点→点のタップでもOK）。</li>
+        <li>線は <b>交差できません</b>。相手の線が通っている所は通れません。</li>
+      </ul>
+
+      <h3>勝敗</h3>
+      <p>自分のラインからラインまで線がつながったら勝ち。<br>
+      <b>引き分けは絶対に起きません</b>。どちらかがつながると、もう片方は必ず道をふさがれています。</p>
+
+      <h3>先手・後手 と ハンデ</h3>
+      <p>対局を作るときに、自分が先手（赤）か後手（青）か、ランダムかを選べます。<br>
+      さらに<b>ハンデ</b>を設定すると、片方だけが対局開始直後に自由に数手打ってから、通常の交互手番が始まります。実力差があるときや、AIが強すぎる／弱すぎるときの調整に使えます。</p>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="vendor/peerjs.min.js"></script>
+  <script src="game.js"></script>
+  <script src="host.js"></script>
+  <script src="net.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
