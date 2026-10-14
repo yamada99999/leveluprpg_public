@@ -189,7 +189,7 @@
 
   // ---------- room / view ----------
   function isConnected(room, seat) {
-    if (seat.isAI) return true;
+    if (seat.isAI || seat.local) return true; // AIと、対面モードの相手（同じ端末）は常に接続中
     for (const w of room.waiters) if (w.token === seat.token) return true;
     return Date.now() - (room.lastSeen.get(seat.token) || 0) < OFFLINE_AFTER_MS;
   }
@@ -216,6 +216,7 @@
       aiLevel: room.aiLevel,
       hasAI: room.seats.some((s) => s.isAI),
       watch: !!room.watch,
+      local2p: !!room.local2p,
       wins: room.wins,
       undoReq: room.undoReq ? { seat: room.undoReq.seat } : null,
       undoNotice: room.undoNotice || null,
@@ -240,7 +241,8 @@
         handicapColor: g.handicapColor,
         handicapRemaining: g.handicapRemaining,
         seatColors: [colorOfSeat(room, 0), colorOfSeat(room, 1)],
-        myColor: me >= 0 ? colorOfSeat(room, me) : null,
+        // 対面モードは1台で両方の色を打つので、手番の色がそのまま「自分の色」
+        myColor: room.local2p ? (g.phase === 'play' ? g.turn : null) : me >= 0 ? colorOfSeat(room, me) : null,
         log: g.log.slice(-40),
       };
     }
@@ -410,11 +412,15 @@
         room.watch = true;
         room.handicap = 0;
         room.seats = [aiSeat(room, body.aiLevel, 0), aiSeat(room, body.aiLevel2, 1)];
+      } else if (body.local2p) {
+        // 対面モード：この端末を回して2人で遊ぶ。通信はしない
+        room.local2p = true;
+        room.seats.push({ token: newToken(), name: cleanName(body.name2), isAI: false, local: true });
       } else if (body.vsAI) {
         room.seats.push(aiSeat(room, body.aiLevel, 1));
       }
       rooms.set(id, room);
-      if (!body.watch && !body.vsAI) openPeer(room);
+      if (!body.watch && !body.vsAI && !body.local2p) openPeer(room);
       return reply(200, { roomId: room.id, token });
     }
 
@@ -472,6 +478,7 @@
       }
       case 'kick': {
         if (notHost()) return notHost();
+        if (room.local2p) return fail('対面モードでは外せません');
         if (room.status === 'playing') return fail('対局中は操作できません');
         const i = Number(body.seat);
         if (!room.seats[i] || room.seats[i].token === room.hostToken) return fail('その席は外せません');
@@ -536,7 +543,7 @@
       case 'move': {
         if (!g) return fail('対局が始まっていません');
         if (me < 0) return fail('観戦中は操作できません');
-        const color = colorOfSeat(room, me);
+        const color = room.local2p ? g.turn : colorOfSeat(room, me);
         const r = G.play(g, color, body.mx, body.my);
         if (!r.ok) return fail(r.error);
         // 申請中に相手が指したら、その申請は無効
@@ -550,6 +557,13 @@
         if (!g) return fail('対局が始まっていません');
         if (me < 0) return fail('観戦中は操作できません');
         if (g.phase !== 'play') return fail('対局中のみ戻せます');
+        if (room.local2p) {
+          // 対面モード：どちらの手でも、1手ずつ自由に戻せる
+          if (!g.moves.length) return fail('戻せる手がありません');
+          G.undo(g, 1);
+          G.addLog(g, '↩ 一手戻しました');
+          return ok();
+        }
         const color = colorOfSeat(room, me);
         if (!G.undoCount(g, color)) return fail('戻せる手がありません');
         if (room.seats[1 - me].isAI) {
@@ -598,7 +612,8 @@
       case 'resign': {
         if (!g) return fail('対局が始まっていません');
         if (me < 0) return fail('観戦中は操作できません');
-        const r = G.resign(g, colorOfSeat(room, me));
+        // 対面モードでは、いま手番の人が投了する
+        const r = G.resign(g, room.local2p ? g.turn : colorOfSeat(room, me));
         return r.ok ? ok() : fail(r.error);
       }
       default:

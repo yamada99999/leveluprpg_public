@@ -96,6 +96,7 @@ body:not(.in-game) .volume { display: none; }
 
 .seg { display: flex; background: rgba(0,0,0,.35); border-radius: 10px; padding: 3px; border: 1px solid var(--line); }
 .seg label { flex: 1; text-align: center; }
+.seg.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; } /* 選択肢が多いときは2列に並べる */
 .seg input { display: none; }
 .seg span { display: block; padding: 8px 4px; border-radius: 8px; color: var(--muted); cursor: pointer; font-weight: 700; font-size: 14px; }
 .seg input:checked + span { background: var(--gold); color: #251a00; }
@@ -145,7 +146,8 @@ body:not(.in-game) .volume { display: none; }
 .pl.R.turn { box-shadow: 0 0 0 2px var(--red), 0 0 18px var(--red-glow); }
 .pl.B.turn { box-shadow: 0 0 0 2px var(--blue), 0 0 18px var(--blue-glow); }
 
-.status { text-align: center; margin: 10px 0; padding: 10px; border-radius: 12px; background: rgba(0,0,0,.25); border: 1px solid var(--line); font-weight: 700; line-height: 1.5; }
+/* 文章が1行でも2行でも高さを変えない（手番が変わるたびに盤が上下にずれないように） */
+.status { text-align: center; margin: 10px 0; padding: 10px; border-radius: 12px; background: rgba(0,0,0,.25); border: 1px solid var(--line); font-weight: 700; line-height: 1.5; min-height: calc(3em + 22px); display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .status.mine { border-color: var(--gold); background: rgba(255,216,77,.08); }
 
 .board-wrap { position: relative; display: grid; place-items: center; }

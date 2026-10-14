@@ -221,8 +221,8 @@ function leave(msg) {
 }
 
 // ---------- home ----------
-function seg(name, options, current) {
-  return `<div class="seg">${options.map(([v, label]) =>
+function seg(name, options, current, cls = '') {
+  return `<div class="seg ${cls}">${options.map(([v, label]) =>
     `<label><input type="radio" name="${name}" value="${v}" ${String(v) === String(current) ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div>`;
 }
 const radioVal = (name) => (document.querySelector(`input[name="${name}"]:checked`) || {}).value;
@@ -231,6 +231,7 @@ function renderHome(joinRoom, err) {
   disconnect();
   const name = store.get('spark:name', '');
   const cfg = store.get('spark:cfg', { mode: 'ai', size: 6, level: 'normal', firstChoice: 'random', handicap: 0, handicapFor: 'self' });
+  const name2 = store.get('spark:name2', '');
   $app.innerHTML = `
   <div class="home">
     <div class="logo">
@@ -252,14 +253,18 @@ function renderHome(joinRoom, err) {
     </div>` : `
     <div class="panel stack">
       <h2>対局を始める</h2>
-      <div class="field">モード${seg('mode', [['ai', 'AIと対戦'], ['friends', '友達と対戦'], ['watch', 'AI同士を観戦']], cfg.mode)}</div>
+      <div class="field">モード${seg('mode', [['ai', 'AIと対戦'], ['local', '対面で対戦'], ['friends', 'ネットで対戦'], ['watch', 'AI同士を観戦']], cfg.mode, 'grid2')}</div>
+      <label class="field" data-mode="local">相手の名前
+        <input id="name2" maxlength="12" value="${esc(name2)}" placeholder="あいて（12文字まで）" autocomplete="off">
+      </label>
       <div class="field" data-mode="ai watch"><span data-label-ai>AIの強さ</span>${seg('level', LEVELS, cfg.level)}</div>
       <div class="field" data-mode="watch">AI-2の強さ${seg('level2', LEVELS, cfg.level2 || 'hard')}</div>
       <div class="field">盤の大きさ${seg('size', [[4, '4'], [5, '5'], [6, '6'], [7, '7'], [8, '8']], cfg.size)}
         <span class="note">数字は1辺の長さ（6 なら赤の点が 6×7、青の点が 7×6）</span></div>
-      <div class="field" data-mode="ai friends">先手・後手${seg('firstChoice', FIRSTS, cfg.firstChoice)}</div>
-      <div class="field" data-mode="ai friends">ハンデ（最初に自由に打てる手数）${seg('handicap', HANDICAPS, cfg.handicap)}</div>
-      <div class="field" data-mode="ai friends" data-need-handicap>ハンデをもらうのは${seg('handicapFor', SIDES, cfg.handicapFor)}</div>
+      <div class="field" data-mode="ai local friends">先手・後手${seg('firstChoice', FIRSTS, cfg.firstChoice)}</div>
+      <div class="field" data-mode="ai local friends">ハンデ（最初に自由に打てる手数）${seg('handicap', HANDICAPS, cfg.handicap)}</div>
+      <div class="field" data-mode="ai local friends" data-need-handicap>ハンデをもらうのは${seg('handicapFor', SIDES, cfg.handicapFor)}</div>
+      <p class="note" data-mode="local">1台のスマホを2人で交互に使って対戦します（通信なし・オフラインOK）。「一手戻る」はどちらの手でも自由に使えます。先手・後手とハンデの「自分」はあなた、「相手」は相手の名前の人です。</p>
       <p class="note" data-mode="friends">ルームを作ると、友達に送るURLが画面に表示されます。友達はスマホやPCのブラウザでURLを開くだけで参加できます（インストール不要）。対局が終わるまで、このアプリは閉じないでください。</p>
       <p class="note" data-mode="watch">AI-1とAI-2が1局ごとに先手を交代して対局します。「つよい」同士だと理論上必ず先手が勝ちます。</p>
       <button class="btn big" id="createBtn" data-act="create">ルームを作成</button>
@@ -286,7 +291,7 @@ function updateHomeVisibility() {
   const label = document.querySelector('[data-label-ai]');
   if (label) label.textContent = mode === 'watch' ? 'AI-1の強さ' : 'AIの強さ';
   const btn = document.getElementById('createBtn');
-  if (btn) btn.textContent = { ai: '対局を始める', friends: 'ルームを作成', watch: '観戦を始める' }[mode] || 'ルームを作成';
+  if (btn) btn.textContent = { ai: '対局を始める', local: '対局を始める', friends: 'ルームを作成', watch: '観戦を始める' }[mode] || 'ルームを作成';
 }
 
 function logoSVG() {
@@ -317,10 +322,16 @@ async function createRoom(btn) {
   const handicap = Number(radioVal('handicap'));
   const handicapFor = radioVal('handicapFor');
   store.set('spark:cfg', { mode, size, level, level2, firstChoice, handicap, handicapFor });
+  let name2 = '';
+  if (mode === 'local') {
+    name2 = document.getElementById('name2').value.trim() || 'あいて';
+    store.set('spark:name2', name2);
+  }
   btn.disabled = true;
   try {
     const res = await api('/api/create', {
-      name, size, aiLevel: level, aiLevel2: level2, firstChoice, handicap, handicapFor, vsAI: mode === 'ai', watch: mode === 'watch',
+      name, name2, size, aiLevel: level, aiLevel2: level2, firstChoice, handicap, handicapFor,
+      vsAI: mode === 'ai', watch: mode === 'watch', local2p: mode === 'local',
     });
     enterRoom(res.roomId, res.token, true);
     if (mode !== 'friends') await act('start');
@@ -405,7 +416,7 @@ function renderLobby(v) {
       ${i === v.me ? '<span class="tag you">あなた</span>' : ''}
       ${s.isHost ? '<span class="tag host">ホスト</span>' : ''}
       ${!s.connected ? '<span class="tag off">未接続</span>' : ''}
-      ${v.isHost && !s.isHost ? `<button class="btn ghost small" data-act="kick" data-seat="${i}">外す</button>` : ''}
+      ${v.isHost && !s.isHost && !v.local2p ? `<button class="btn ghost small" data-act="kick" data-seat="${i}">外す</button>` : ''}
     </div>`;
   }).join('');
   const canStart = v.seats.length === 2;
@@ -430,7 +441,7 @@ function renderLobby(v) {
           <select data-setting="size">${[4, 5, 6, 7, 8].map((n) => `<option value="${n}" ${n === v.size ? 'selected' : ''}>${n}（赤${n}×${n + 1}）</option>`).join('')}</select>
         </label>
         ${v.watch ? '' : `<label class="field" style="flex:1">先手・後手
-          <select data-setting="firstChoice">${FIRSTS.map(([f, t]) => `<option value="${f}" ${f === v.firstChoice ? 'selected' : ''}>${t}</option>`).join('')}</select>
+          <select data-setting="firstChoice">${firstsFor(v).map(([f, t]) => `<option value="${f}" ${f === v.firstChoice ? 'selected' : ''}>${t}</option>`).join('')}</select>
         </label>`}
       </div>
       <div class="row">
@@ -653,8 +664,15 @@ function analysisPanel(v, real, a) {
   </div>`;
 }
 
+// 先手・後手の選択肢。対面モードでは「自分／相手」ではなく2人の名前で出す
+function firstsFor(v) {
+  if (!v.local2p) return FIRSTS;
+  return [['random', 'ランダム'], ['self', `${esc(v.seats[0].name)}が先手`], ['opp', `${esc(v.seats[1].name)}が先手`]];
+}
+
 function renderGame(v) {
   const real = v.game;
+  const local = !!v.local2p; // 対面モード（1台で2人）
   const reviewing = S.review != null && real.phase === 'finished';
   const analysis = reviewing ? getAnalysis(real) : null;
   const g = reviewing ? reviewState(real) : real;
@@ -671,7 +689,7 @@ function renderGame(v) {
     const lit = myTurn && c === myColor; // 自分の手番の時だけ自分の色を光らせる。相手の手番の時はどちらも鎮める
     return `<div class="pl ${c} ${lit ? 'turn' : ''}">
       <span class="swatch"></span>
-      <span class="nm">${esc(s.name)}${i === me ? '（あなた）' : ''}</span>
+      <span class="nm">${esc(s.name)}${i === me && !local ? '（あなた）' : ''}</span>
       <span class="goal">${c === 'R' ? '上↕下' : '左↔右'}</span>
       ${g.handicapColor === c ? `<span class="tag handicap">ハンデ+${g.handicap}</span>` : ''}
       <span class="wins">${v.wins[i]}勝</span>
@@ -693,6 +711,12 @@ function renderGame(v) {
     const winSeat = seatOf(g.winner);
     const who = myColor ? (g.winner === myColor ? 'あなたの勝ち！' : 'あなたの負け…') : `<b class="${g.winner}">${esc(v.seats[winSeat].name)}</b> の勝ち！`;
     status = `${who}${g.resigned ? '（投了）' : ''}`;
+  } else if (local && g.phase === 'play') {
+    // 対面モード：いま打つ人の名前を大きく出す
+    const s = v.seats[seatOf(g.turn)];
+    status = g.handicapRemaining > 0
+      ? `<b class="${g.turn}">${esc(s.name)}</b>（${COLOR_NAME[g.turn]}）の番：ハンデであと <b>${g.handicapRemaining}手</b> 自由に打てます`
+      : `<b class="${g.turn}">${esc(s.name)}</b>（${COLOR_NAME[g.turn]}）の番：${COLOR_NAME[g.turn]}の点から隣の点へ線を引こう`;
   } else if (g.handicapRemaining > 0 && myTurn) {
     status = `あなたはハンデであと <b>${g.handicapRemaining}手</b> 自由に打てます：<b class="${myColor}">${COLOR_NAME[myColor]}</b>の点から隣の点へ`;
   } else if (g.handicapRemaining > 0) {
@@ -711,7 +735,7 @@ function renderGame(v) {
   let undoUI = '';
   if (g.phase === 'play' && myColor) {
     const canTry = g.moves.length > 0;
-    if (vsAI) undoUI = `<button class="btn ghost small" data-act="undo" ${canTry ? '' : 'disabled'}>↩ 一手戻る</button>`;
+    if (vsAI || local) undoUI = `<button class="btn ghost small" data-act="undo" ${canTry ? '' : 'disabled'}>↩ 一手戻る</button>`;
     else if (req && req.seat === me) undoUI = '<span class="note wait">一手戻るを申請中…</span><button class="btn ghost small" data-act="undoCancel">申請を取り消す</button>';
     else if (!req) undoUI = `<button class="btn ghost small" data-act="undo" ${canTry ? '' : 'disabled'}>↩ 一手戻るを申請</button>`;
   }
@@ -727,7 +751,7 @@ function renderGame(v) {
   const atStart = !S.branch && S.review === 0;
   const atEnd = S.branch ? S.branch.pos === S.branch.moves.length : S.review === N;
   const finished = g.phase === 'finished';
-  const iWon = finished && g.winner === myColor;
+  const iWon = finished && !local && g.winner === myColor;
   const showWin = finished && S.winShown !== g.moves.length + ':' + g.winner;
   if (finished) S.winShown = g.moves.length + ':' + g.winner;
 
@@ -740,13 +764,13 @@ function renderGame(v) {
     ${v.isHost ? '<button class="btn ghost small" data-act="toLobby">ロビーへ</button>' : ''}
   </div>
   <div class="players">${player('R')}${player('B')}</div>
-  <div class="status ${myTurn ? 'mine' : ''}">${status}</div>
+  <div class="status ${myTurn ? 'mine' : ''}"><span>${status}</span></div>
   ${askBox}
   <div class="board-wrap">
     ${boardSVG({ ...v, game: g })}
     ${finished ? `<div class="win-banner ${g.winner} ${showWin ? 'pop' : ''}">
-      <div class="big title-font">${iWon ? '⚡ あなたの勝ち！' : myColor ? 'あなたの負け…' : `${esc(v.seats[seatOf(g.winner)].name)} の勝ち`}</div>
-      <div>${myColor ? `${esc(v.seats[seatOf(g.winner)].name)}（${COLOR_NAME[g.winner]}）の勝ち` : `${COLOR_NAME[g.winner]}の勝ち`}${g.resigned ? '（投了）' : ''}</div>
+      <div class="big title-font">${iWon ? '⚡ あなたの勝ち！' : myColor && !local ? 'あなたの負け…' : `⚡ ${esc(v.seats[seatOf(g.winner)].name)} の勝ち！`}</div>
+      <div>${myColor && !local ? `${esc(v.seats[seatOf(g.winner)].name)}（${COLOR_NAME[g.winner]}）の勝ち` : `${COLOR_NAME[g.winner]}の勝ち`}${g.resigned ? '（投了）' : ''}</div>
     </div>` : ''}
   </div>
   <div class="actions">
@@ -764,7 +788,7 @@ function renderGame(v) {
     </div>` : ''}
     ${finished ? '<button class="btn ghost" data-act="rvStart">📼 この対局を振り返る</button>' : ''}
     ${finished && v.isHost ? `<div class="rematch">
-      ${v.watch ? '' : seg('rematchFirst', FIRSTS, S.rematchFirst || v.firstChoice)}
+      ${v.watch ? '' : seg('rematchFirst', firstsFor(v), S.rematchFirst || v.firstChoice)}
       <button class="btn big" data-act="start">再戦する</button>
     </div>` : ''}
     ${finished && !v.isHost ? '<p class="note">ホストの再戦を待っています…</p>' : ''}
@@ -927,7 +951,12 @@ const handlers = {
   },
   toLobby: () => { if (confirm('対局を中断してロビーに戻りますか？')) act('toLobby'); },
   replaceAI: (el) => act('replaceAI', { seat: Number(el.dataset.seat) }),
-  resign: () => { if (confirm('投了しますか？')) act('resign'); },
+  resign: () => {
+    const v = S.view;
+    const g = v && v.game;
+    const who = v && v.local2p && g ? `${v.seats[g.seatColors.indexOf(g.turn)].name}（${COLOR_NAME[g.turn]}）が` : '';
+    if (confirm(`${who}投了しますか？`)) act('resign');
+  },
   undo: () => { S.tapFrom = null; act('undo'); },
   undoCancel: () => act('undoCancel'),
   undoAnswer: (el) => act('undoAnswer', { accept: el.dataset.accept === '1' }),
@@ -975,7 +1004,7 @@ document.addEventListener('keydown', (e) => {
 // 友達対局のホスト中は、アプリを裏に回しても（LINEでURLを送る間など）通信が止まらないようにする
 function syncNative() {
   const v = S.view;
-  callNative('setHosting', !!(S.local && v && v.isHost && !v.hasAI));
+  callNative('setHosting', !!(S.local && v && v.isHost && !v.hasAI && !v.local2p));
   callNative('setKeepScreenOn', !!(v && v.game));
 }
 // 戻るボタン：開いている物を閉じる → ルームにいれば退出の確認。true を返すとアプリは閉じない
@@ -984,7 +1013,7 @@ window.__appBack = () => {
   if (S.tapFrom) { S.tapFrom = null; render(); return true; }
   if (S.review != null) { handlers.rvExit(); return true; }
   if (S.roomId) {
-    const closesRoom = S.local && S.view && S.view.isHost && !S.view.hasAI;
+    const closesRoom = S.local && S.view && S.view.isHost && !S.view.hasAI && !S.view.local2p;
     if (confirm(closesRoom ? 'ルームを閉じて退出しますか？（友達との対局も終わります）' : 'ルームから退出しますか？')) leave();
     return true;
   }
