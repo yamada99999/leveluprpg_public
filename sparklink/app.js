@@ -115,13 +115,25 @@ function winPathOf(n, owner, color) {
   return null;
 }
 
-function dotNear(n, color, p, maxDist = 0.85) {
+// 指の位置に一番近い「操作中の色」の点。相手の色の点は操作に関係ないので無視し、
+// 自分の点どうしの中間までを丸ごと当たり判定にする（盤の外側も少しはみ出してOK）
+function dotNear(n, color, p, maxDist = 1.5) {
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   let x; let y;
-  if (color === 'R') { x = Math.round((p.x - 1) / 2) * 2 + 1; y = Math.round(p.y / 2) * 2; } else { x = Math.round(p.x / 2) * 2; y = Math.round((p.y - 1) / 2) * 2 + 1; }
-  const inX = color === 'R' ? x >= 1 && x <= 2 * n - 1 : x >= 0 && x <= 2 * n;
-  const inY = color === 'R' ? y >= 0 && y <= 2 * n : y >= 1 && y <= 2 * n - 1;
-  if (!inX || !inY) return null;
+  if (color === 'R') {
+    x = clamp(Math.round((p.x - 1) / 2) * 2 + 1, 1, 2 * n - 1);
+    y = clamp(Math.round(p.y / 2) * 2, 0, 2 * n);
+  } else {
+    x = clamp(Math.round(p.x / 2) * 2, 0, 2 * n);
+    y = clamp(Math.round((p.y - 1) / 2) * 2 + 1, 1, 2 * n - 1);
+  }
   return Math.hypot(p.x - x, p.y - y) <= maxDist ? [x, y] : null;
+}
+
+// 指の位置に一番近い自分の点が「つなげられる先」ならそれを返す
+function snapTarget(n, color, targets, p) {
+  const d = dotNear(n, color, p);
+  return d ? targets.find(([x, y]) => x === d[0] && y === d[1]) : undefined;
 }
 
 function targetsFrom(n, owner, [x, y]) {
@@ -793,7 +805,7 @@ function renderGame(v) {
     </div>` : ''}
     ${finished && !v.isHost ? '<p class="note">ホストの再戦を待っています…</p>' : ''}
   </div>
-  <p class="note center">${S.tapFrom ? 'つなぐ先の点をタップ（別の場所をタップでキャンセル）' : '手数 ' + g.moves.length}</p>`;
+  <p class="note center">${S.tapFrom ? 'つなぐ先の点をタップ（同じ点をもう一度タップでキャンセル）' : '手数 ' + g.moves.length}</p>`;
 }
 
 // ---------- pointer (drag & tap) ----------
@@ -847,16 +859,17 @@ document.addEventListener('pointerdown', (e) => {
   const p = svgPoint(svg, e);
 
   if (S.tapFrom) {
-    const t = targetsFrom(g.n, g.owner, S.tapFrom).find(([x, y]) => Math.hypot(p.x - x, p.y - y) <= 0.9);
+    const t = snapTarget(g.n, color, targetsFrom(g.n, g.owner, S.tapFrom), p);
     if (t) { e.preventDefault(); return sendMove(S.tapFrom, t); }
   }
   const d = dotNear(g.n, color, p);
   if (!d) { if (S.tapFrom) { S.tapFrom = null; render(); } return; }
   const targets = targetsFrom(g.n, g.owner, d);
-  if (!targets.length) { toast('その点からは線を引けません'); return; }
+  if (!targets.length) { if (S.tapFrom) { S.tapFrom = null; render(); } toast('その点からは線を引けません'); return; }
   e.preventDefault();
   svg.setPointerCapture(e.pointerId);
-  S.drag = { svg, from: d, targets, moved: false };
+  const wasSel = !!S.tapFrom && S.tapFrom[0] === d[0] && S.tapFrom[1] === d[1];
+  S.drag = { svg, n: g.n, color, from: d, targets, moved: false, wasSel };
   const ln = svg.querySelector('#dragLine');
   ln.setAttribute('x1', d[0] * U); ln.setAttribute('y1', d[1] * U);
   ln.setAttribute('x2', d[0] * U); ln.setAttribute('y2', d[1] * U);
@@ -869,7 +882,7 @@ document.addEventListener('pointermove', (e) => {
   if (!dr) return;
   const p = svgPoint(dr.svg, e);
   if (Math.hypot(p.x - dr.from[0], p.y - dr.from[1]) > 0.5) dr.moved = true;
-  const snap = dr.targets.find(([x, y]) => Math.hypot(p.x - x, p.y - y) <= 0.9);
+  const snap = snapTarget(dr.n, dr.color, dr.targets, p);
   const end = snap || [p.x, p.y];
   const ln = dr.svg.querySelector('#dragLine');
   const tip = dr.svg.querySelector('#dragTip');
@@ -884,10 +897,11 @@ function endDrag(e, cancel) {
   if (!dr) return;
   S.drag = null;
   const p = svgPoint(dr.svg, e);
-  const snap = !cancel && dr.targets.find(([x, y]) => Math.hypot(p.x - x, p.y - y) <= 0.9);
+  const snap = !cancel && snapTarget(dr.n, dr.color, dr.targets, p);
   if (snap) return sendMove(dr.from, snap);
   if (!dr.moved && !cancel) {
-    S.tapFrom = dr.from; // タップ操作：次に隣の点をタップ
+    // タップ操作：次に隣の点をタップ。選択中の点をもう一度タップしたら選択解除
+    S.tapFrom = dr.wasSel ? null : dr.from;
   }
   render();
 }
