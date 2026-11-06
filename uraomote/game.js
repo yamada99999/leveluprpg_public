@@ -698,7 +698,11 @@
   // ---------- ロビー ----------
   let netStatus = { state: '', room: '' };
   function inviteUrl(room) {
-    const base = CFG.publicUrl || (location.origin + location.pathname);
+    // 確認用サーバー（http://localhost:8095 などポート付き）ではそのページ自身、
+    // それ以外（公開ページ・APK）では config.js の公開URLを使う
+    const here = location.origin + location.pathname;
+    const dev = location.port !== '' || location.protocol === 'file:';
+    const base = dev ? here : (CFG.publicUrl || here);
     return `${base}?room=${room}`;
   }
 
