@@ -208,8 +208,11 @@
   }
 
   // ---------- 実際の物理で「解けるか」を探す ----------
-  // 束を90°ずつ（ゆっくり・玉が落ち着くのを待ちながら）回す手順を総当たりして、全部の玉をゴールに入れられるか調べる。
-  // アウトになる回し方は使わない。見つかったら回す向きの列（+1/-1、オモテから見て）を返す。
+  // 束を少しずつ（ゆっくり・玉が落ち着くのを待ちながら）回す手順と、「床を描く」手順を総当たりして、
+  // 全部の玉をゴールに入れられるか調べる。アウトになる手順は使わない。
+  //   step  … 1回に回す角度（π/2 = 90°、π/4 = 45°。45°だと「斜めで止めて角に玉を預ける」ような手も使える）
+  //   draws … 描いてよい床の候補 [{ face, seg }]（その面に床が出る。描くのは相棒＝反対の面の人）
+  // 手順は、数（+1/-1 = その角度だけ回す。オモテから見た向き）か、{ d: 候補番号 }（床を描く）の列。
   const gravAt = (th) => (side) => (side === 'A' ? [Math.sin(th), Math.cos(th)] : [-Math.sin(th), Math.cos(th)]);
   function settle(world, th, ev) {
     const g = gravAt(th);
@@ -221,9 +224,9 @@
       if (!moving && world.hold <= 0) { if (++still > 12) return; } else still = 0;
     }
   }
-  function turn(world, th0, dir, speed = 2) {
+  function turn(world, th0, dir, speed = 2, stepAng = Math.PI / 2) {
     const ev = [];
-    const SP = speed / 60, target = th0 + dir * Math.PI / 2;
+    const SP = speed / 60, target = th0 + dir * stepAng;
     let th = th0;
     for (let f = 0; f < 60 * 12 && dir * (target - th) > 1e-9; f++) {
       // 見えている玉・敵が速く動いている間は回すのを待つ（ワープ中で見えないものは待たない＝人と同じ）
@@ -235,55 +238,73 @@
     settle(world, target, ev);
     return { ev, th: target };
   }
-  function keyOf(world, k) {
-    return ((k % 4) + 4) % 4 + '|' + world.objs.map((o) => (o.goaled ? 'G' : o.side + Math.round(o.x / 10) + ',' + Math.round(o.y / 10))).join('|');
+  // 床を描く（その場で止まったまま。描いた床に玉が押し出されることもあるので、少し落ち着かせる）
+  function drawLine(world, cand, th) {
+    world.lines[cand.face] = cand.seg.slice();
+    const ev = [];
+    settle(world, th, ev);
+    return { ev };
   }
-  // 見つけた手順を、回す速さを変えて最初からやり直しても成功するか（人の操作は毎回少しずつ違うので）
-  function replay(P, actions, speed) {
+  function keyOf(world, k, n, lineKey) {
+    return ((k % n) + n) % n + '|' + lineKey + '|' + world.objs.map((o) => (o.goaled ? 'G' : o.side + Math.round(o.x / 10) + ',' + Math.round(o.y / 10))).join('|');
+  }
+  function startWorld(P) {
     const w = makeWorld(P, { hearts: false });
     const ev0 = [];
-    for (let i = 0; i < 200; i++) step(w, gravAt(0), 1 / 60, ev0);
-    if (ev0.some((e) => e.type === 'fail')) return false;
+    for (let i = 0; i < 200; i++) step(w, gravAt(0), 1 / 60, ev0); // スタート直後に落ち着かせる
+    return { w, bad: ev0.some((e) => e.type === 'fail') };
+  }
+  // 見つけた手順を、回す速さを変えて最初からやり直しても成功するか（人の操作は毎回少しずつ違うので）
+  function replay(P, actions, speed, opt = {}) {
+    const stepAng = opt.step || Math.PI / 2, draws = opt.draws || [];
+    const { w, bad } = startWorld(P);
+    if (bad) return false;
     let k = 0;
     for (const a of actions) {
-      const r = turn(w, k * Math.PI / 2, a, speed);
-      k += a;
+      let r;
+      if (typeof a === 'object') r = drawLine(w, draws[a.d], k * stepAng);
+      else { r = turn(w, k * stepAng, a, speed, stepAng); k += a; }
       if (r.ev.some((e) => e.type === 'fail')) return false;
       if (w.clear) return true;
     }
     return w.clear;
   }
-  function robust(P, actions) {
-    return [1.3, 2.8].every((sp) => replay(P, actions, sp));
+  function robust(P, actions, opt) {
+    return [1.3, 2.8].every((sp) => replay(P, actions, sp, opt));
   }
 
   function search(P, opt = {}) {
     const maxStates = opt.maxStates || 800, maxDepth = opt.maxDepth || 24;
-    const w0 = makeWorld(P, { hearts: false });
-    const ev0 = [];
-    for (let i = 0; i < 200; i++) step(w0, gravAt(0), 1 / 60, ev0); // スタート直後に落ち着かせる
-    if (ev0.some((e) => e.type === 'fail')) return { ok: false, reason: 'start-fail' };
-    if (w0.clear) return { ok: true, actions: [], explored: 1 };
-    const seen = new Set([keyOf(w0, 0)]);
-    let frontier = [{ w: w0, k: 0, acts: [] }];
+    const stepAng = opt.step || Math.PI / 2, n = Math.round((2 * Math.PI) / stepAng);
+    const draws = opt.draws || [];
+    const { w: w0, bad } = startWorld(P);
+    if (bad) return { ok: false, reason: 'start-fail' };
+    if (w0.clear) return { ok: true, actions: [], explored: 1, step: stepAng };
+    const lk = (L) => (L.A === undefined ? '-' : L.A) + ',' + (L.B === undefined ? '-' : L.B);
+    const seen = new Set([keyOf(w0, 0, n, '-,-')]);
+    let frontier = [{ w: w0, k: 0, acts: [], L: {} }];
     let explored = 0;
     for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
       const next = [];
-      for (const n of frontier) {
-        for (const dir of [1, -1]) {
-          const w = cloneWorld(n.w);
-          const r = turn(w, n.k * Math.PI / 2, dir);
+      for (const nd of frontier) {
+        const moves = [1, -1];
+        draws.forEach((c, i) => { if (nd.L[c.face] !== i) moves.push({ d: i }); });
+        for (const mv of moves) {
+          const w = cloneWorld(nd.w);
+          let r, k = nd.k, L = nd.L;
+          if (typeof mv === 'object') { r = drawLine(w, draws[mv.d], k * stepAng); L = { ...L, [draws[mv.d].face]: mv.d }; }
+          else { r = turn(w, k * stepAng, mv, 2, stepAng); k += mv; }
           explored++;
           if (r.ev.some((e) => e.type === 'fail')) continue;
-          const acts = [...n.acts, dir];
+          const acts = [...nd.acts, mv];
           if (w.clear) {
-            if (!opt.robust || robust(P, acts)) return { ok: true, actions: acts, explored };
+            if (!opt.robust || robust(P, acts, { step: stepAng, draws })) return { ok: true, actions: acts, explored, step: stepAng };
             continue; // ぎりぎりの手順は採用しない（別の手順を探し続ける）
           }
-          const key = keyOf(w, n.k + dir);
+          const key = keyOf(w, k, n, lk(L));
           if (seen.has(key)) continue;
           seen.add(key);
-          next.push({ w, k: n.k + dir, acts });
+          next.push({ w, k, acts, L });
           if (explored > maxStates) return { ok: false, reason: 'limit', explored };
         }
       }

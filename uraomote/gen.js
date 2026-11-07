@@ -369,6 +369,70 @@
     };
   }
 
+  // ---------- 物理で確かめる（45°刻み・床を描く手も使う） ----------
+  const STEP45 = Math.PI / 4;
+  function verify(P, draws, budget, maxStates = 900) {
+    const PH = root.URA_PHYS;
+    const res = PH.search(P, { maxStates, maxDepth: 30, robust: true, step: STEP45, draws });
+    if (budget) budget.used += res.explored || 0;
+    return res;
+  }
+  // 床を描かなくても解けるか（描くのが必須かどうかを調べる）
+  function needsDraw(P, budget) {
+    const PH = root.URA_PHYS;
+    const res = PH.search(P, { maxStates: 1200, maxDepth: 30, step: STEP45 });
+    if (budget) budget.used += res.explored || 0;
+    if (res.ok) return false;          // 描かなくても行ける（＝「描かなきゃ」という先入観のワナ）
+    return res.reason === 'none' ? true : null; // 調べきれなかったときは null
+  }
+
+  // ---------- 穴と足場の部屋（床を描くギミック） ----------
+  // ゴールのある部屋の床を「左右の足場＋あいだの穴（底は危険地帯）」に作りかえ、ゴールを奥の足場に置く。
+  //  must … 天井も危険地帯にして、ひっくり返して回り込む道をふさぐ（相棒に橋を描いてもらうしかない）
+  //  それ以外 … 天井は空けておく（描いてもいいが、束をひっくり返せば足場から足場へ行ける）
+  function addBridge(M, sol, pattern, rand, must) {
+    const ri = (a, b) => a + Math.floor(rand() * (b - a + 1));
+    const face = M.goal.face;
+    const rs = rooms(M.divs[face]);
+    const c = rs[roomAt(rs, M.goal.y)];
+    if (!c) return null;
+    const h = ri(70, 115);
+    if (c.bottom - c.top < h + 170) return null;
+    const ph = c.bottom - h;
+    // 入ってくる側（最後に自由に動かし始める場所）
+    const last = sol.plan[sol.plan.length - 1];
+    let side;
+    if (Math.abs(last.x - XL) < 3) side = 'L';
+    else if (Math.abs(last.x - XR) < 3) side = 'R';
+    else side = M.goal.x > last.x ? 'L' : 'R';
+    // この部屋にあるワープ（入口・出口）は、足場より上でないといけない
+    const pts = [];
+    for (const w of M.warps) { if (w.face === face) pts.push(warpIn(w)); if (other(w.face) === face) pts.push(warpOut(w)); }
+    if (pts.some((p) => p.y > c.top && p.y < c.bottom && p.y > ph - 40)) return null;
+    if (must && pts.some((p) => p.y > c.top && p.y < c.bottom && p.y < c.top + 80)) return null;
+    // 足場の場所にもとからある危険地帯（両面ぶん）があったら作り直す
+    const zone = [WALL, ph - 45, W - 2 * WALL, c.bottom - ph + 45];
+    const overlap = (r, q) => r[0] < q[0] + q[2] && q[0] < r[0] + r[2] && r[1] < q[1] + q[3] && q[1] < r[1] + r[3];
+    if (dangersOn(M, face).some((r) => overlap(r, zone))) return null;
+    const wp = ri(70, 118);
+    let pL, pR, gx;
+    if (side === 'L') { pL = ri(100, 270 - wp); pR = pL + wp; gx = ri(pR + 32, 316); }
+    else { pR = ri(90 + wp, 260); pL = pR - wp; gx = ri(44, pL - 32); }
+    const P = JSON.parse(JSON.stringify(pattern));
+    P[face].walls.push([WALL, ph, pL - WALL, c.bottom - ph], [pR, ph, W - WALL - pR, c.bottom - ph]);
+    const addDanger = (rect) => {
+      const seen = rand() < 0.5 ? face : other(face); // 穴の底は、どちらの人に見えるかランダム
+      P[seen].danger.push(seen === face ? rect : mirrorRect(rect));
+    };
+    addDanger([pL, c.bottom - 40, wp, 40]);
+    if (must) addDanger([WALL, c.top, W - 2 * WALL, 40]);
+    P.goal = { side: face, x: gx, y: ph - 16, r: 24 };
+    // スタートがこの部屋の床だったら、入ってくる側の足場の上へ
+    if (P.start.side === face && P.start.y > c.top && P.start.y < c.bottom) P.start = { side: face, x: side === 'L' ? ri(40, pL - 30) : ri(pR + 30, 320), y: ph - R };
+    const draws = [{ face, seg: [pL - 14, ph - 1, pR + 14, ph - 1] }];
+    return { pattern: P, draws };
+  }
+
   // ---------- 玉を増やす・敵を置く ----------
   // 何を足すかは難しさレベルで決める（机上のルール）
   function extrasFor(lv, rand) {
@@ -380,33 +444,33 @@
     return { balls: Math.min(balls, 3), enemies: Math.min(enemies, 2) };
   }
 
-  // 足した玉・敵の置き場所をいくつか試し、実際の物理で「束を90°ずつ回して全部の玉をゴールに入れられるか」を調べる。
+  // 足した玉・敵の置き場所をいくつか試し、実際の物理で「全部の玉をゴールに入れられるか」を調べる。
   // 入れられる置き方が見つかったら採用（見つからなければ、その形はあきらめる）
-  function placeExtras(M, pattern, want, rand, budget) {
-    const PH = root.URA_PHYS;
-    if (!PH) return null;
+  function placeExtras(M, pattern, want, rand, budget, draws) {
     const rs = { A: rooms(M.divs.A), B: rooms(M.divs.B) };
     const roomKey = (face, y) => face + roomAt(rs[face], y);
-    const startRoom = roomKey(M.start.face, M.start.y);
-    const goalRoom = roomKey(M.goal.face, M.goal.y);
+    const startRoom = roomKey(pattern.start.side, pattern.start.y);
+    const goalRoom = roomKey(pattern.goal.side, pattern.goal.y);
     const spots = [];
     for (const f of ['A', 'B']) rs[f].forEach((c) => { for (const x of [50, 130, 230, 310]) spots.push({ side: f, x, y: c.bottom - R }); });
     const warpPts = (face) => M.warps.flatMap((w) => [w.face === face ? warpIn(w) : null, other(w.face) === face ? warpOut(w) : null]).filter(Boolean);
+    const allDanger = (face) => [...pattern[face].danger, ...pattern[other(face)].danger.map(mirrorRect)];
     const okSpot = (s) => {
+      if (pattern[s.side].walls.some((w) => rectDist(s.x, s.y, w) < R)) return false; // 足場の中など
       if (warpPts(s.side).some((p) => Math.hypot(p.x - s.x, p.y - s.y) < 60)) return false;
-      if (dangersOn(M, s.side).some((r) => rectDist(s.x, s.y, r) < 50)) return false;
-      if (M.goal.face === s.side && Math.hypot(M.goal.x - s.x, M.goal.y - s.y) < 70) return false;
+      if (allDanger(s.side).some((r) => rectDist(s.x, s.y, r) < 50)) return false;
+      if (pattern.goal.side === s.side && Math.hypot(pattern.goal.x - s.x, pattern.goal.y - s.y) < 70) return false;
       return true;
     };
     const ballSpots = spots.filter((s) => okSpot(s) && roomKey(s.side, s.y) !== goalRoom);
-    for (let tries = 0; tries < 15; tries++) {
+    for (let tries = 0; tries < 12; tries++) {
       if (budget && budget.used > budget.max) return null;
-      const balls = [{ side: M.start.face, x: M.start.x, y: M.start.y }];
+      const balls = [{ ...pattern.start }];
       const used = new Set([startRoom]);
       // 足す玉は、なるべく反対の面に（2人ともそれぞれ自分の玉を見るように）
       for (let i = 1; i < want.balls; i++) {
         const free = (s) => balls.every((b) => b.side !== s.side || Math.hypot(b.x - s.x, b.y - s.y) > 60);
-        const prefer = ballSpots.filter((s) => s.side !== M.start.face && !used.has(roomKey(s.side, s.y)) && free(s));
+        const prefer = ballSpots.filter((s) => s.side !== pattern.start.side && !used.has(roomKey(s.side, s.y)) && free(s));
         let pool = prefer.length && rand() < 0.8 ? prefer : ballSpots.filter((s) => !used.has(roomKey(s.side, s.y)) && free(s));
         if (!pool.length) pool = ballSpots.filter(free); // 部屋が足りなければ、同じ部屋の別の場所でもよい
         if (!pool.length) break;
@@ -424,65 +488,88 @@
       }
       if (enemies.length < want.enemies) return null;
       const P = { ...pattern, balls, enemies };
-      const res = PH.search(P, { maxStates: 600, maxDepth: 26, robust: true });
-      if (budget) budget.used += res.explored || 0;
-      if (res.ok) return { pattern: P, actions: res.actions };
+      const res = verify(P, draws, budget, 700);
+      if (res.ok) return { pattern: P, actions: res.actions, step: res.step };
     }
     return null;
   }
 
+  // 床を描くギミックを入れる割合（机上のルール）。入れたうち、およそ6割は「描くのが必須」、4割は「実は描かなくていい」（必須の形は作りやすいので、狙いは少し控えめに）
+  const bridgeP = (lv) => (lv >= 7 ? 0.7 : 0);
+
   function make(n, seed) {
     const rand = rng((Math.imul(seed >>> 0, 2654435761) ^ (n * 40503)) >>> 0);
     // うまく作れないときは、少しずつ易しくして必ず作る
-    // 玉・敵の数は最初に決める。どうしても置けないときだけ、少しずつ減らす
+    // 玉・敵の数・床のギミックは最初に決める。どうしても置けないときだけ、少しずつ減らす
     const want = extrasFor(Math.min(n, 20), rand);
-    let exFails = 0;
+    let wantBridge = rand() < bridgeP(Math.min(n, 20));
+    const mustDraw = rand() < 0.45;
+    let exFails = 0, brFails = 0;
     // 物理の探索は重いので、使ってよい量を決めておく。使い切ったら玉・敵を1つ減らす
-    const budget = { used: 0, max: 6000 };
+    const budget = { used: 0, max: 7000 };
     const t0 = Date.now();
     let downgraded = 0;
     for (let attempt = 0; attempt < 2400; attempt++) {
       const level = Math.max(6, Math.min(n, 20) - Math.floor(attempt / 150)); // 20 以降の難しさは頭打ち
-      // 時間がかかりすぎたら、玉・敵を減らす（1.5秒ごとに1つ、3秒を超えたら足さない）
+      // 時間がかかりすぎたら、玉・敵を減らす（1.5秒ごとに1つ、3秒を超えたら足さない。4秒を超えたら床のギミックもやめる）
       const spent = Date.now() - t0;
       while (downgraded < Math.floor(spent / 1500) && (want.enemies > 0 || want.balls > 1)) {
         if (want.enemies > 0) want.enemies--; else want.balls--;
         downgraded++;
       }
       if (spent > 3000) { want.enemies = 0; want.balls = 1; }
+      if (spent > 4000) wantBridge = false;
       const r = tryBuild(level, rand);
-      if (r) {
-        let pattern = toPattern(r.M);
-        let actions = null;
-        if (want.balls > 1 || want.enemies > 0) {
-          const ex = placeExtras(r.M, pattern, want, rand, budget);
-          if (!ex) { // この形では無理だった：別の形で作り直す
-            if (++exFails % 12 === 0 || budget.used > budget.max) {
-              if (want.enemies > 0) want.enemies--; else if (want.balls > 1) want.balls--;
-              budget.used = 0;
-            }
-            continue;
-          }
-          pattern = ex.pattern; actions = ex.actions;
-        }
-        // ハートは半分くらいのステージに1つ
-        const heart = rand() < 0.5 ? placeHeart(r.M, r.sol, rand) : null;
-        pattern.hearts = heart ? [{ id: 'h1', ...heart }] : [];
-        const nb = (pattern.balls || [1]).length, ne = (pattern.enemies || []).length;
-        return {
-          pattern,
-          name: '自動生成',
-          hint: `その場で作った迷路。${nb > 1 ? `玉${nb}つ（全部ゴールへ）・` : ''}${ne ? `敵${ne}体・` : ''}最短でワープ${r.sol.warps}回くらい。危険地帯${r.M.dangers.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}。`,
-          plan: actions ? null : r.sol.plan,
-          actions,
-          heart,
-          warps: r.sol.warps,
-          balls: nb,
-          enemies: ne,
-          level,
-          model: r.M,
-        };
+      if (!r) continue;
+      let pattern = toPattern(r.M);
+      let actions = null, step = null, draws = [], needDraw = false;
+      if (wantBridge) {
+        const br = addBridge(r.M, r.sol, pattern, rand, mustDraw);
+        if (!br) { if (++brFails > 60) wantBridge = false; continue; }
+        pattern = br.pattern; draws = br.draws;
       }
+      if (want.balls > 1 || want.enemies > 0) {
+        const ex = placeExtras(r.M, pattern, want, rand, budget, draws);
+        if (!ex) { // この形では無理だった：別の形で作り直す
+          if (++exFails % 12 === 0 || budget.used > budget.max) {
+            if (want.enemies > 0) want.enemies--; else if (want.balls > 1) want.balls--;
+            budget.used = 0;
+          }
+          continue;
+        }
+        pattern = ex.pattern; actions = ex.actions; step = ex.step;
+      } else if (wantBridge) {
+        const res = verify(pattern, draws, budget);
+        if (!res.ok) { if (++brFails > 60) wantBridge = false; continue; }
+        actions = res.actions; step = res.step;
+      }
+      if (wantBridge) {
+        const nd = needsDraw(pattern, budget);
+        if (nd === null) continue; // 必須かどうか判断できない形は使わない
+        needDraw = nd;
+      }
+      // ハートは半分くらいのステージに1つ（足場や穴の中には置かない）
+      let heart = rand() < 0.5 ? placeHeart(r.M, r.sol, rand) : null;
+      if (heart && (pattern[heart.side].walls.some((w) => rectDist(heart.x, heart.y, w) < 18) ||
+        [...pattern[heart.side].danger, ...pattern[other(heart.side)].danger.map(mirrorRect)].some((d) => rectDist(heart.x, heart.y, d) < 40))) heart = null;
+      pattern.hearts = heart ? [{ id: 'h1', ...heart }] : [];
+      const nb = (pattern.balls || [1]).length, ne = (pattern.enemies || []).length;
+      return {
+        pattern,
+        name: '自動生成',
+        // 床が必要かどうかは書かない（「描かなきゃ」という先入観もゲームのうち）
+        hint: `その場で作った迷路。${nb > 1 ? `玉${nb}つ（全部ゴールへ）・` : ''}${ne ? `敵${ne}体・` : ''}最短でワープ${r.sol.warps}回くらい。危険地帯${pattern.A.danger.length + pattern.B.danger.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}${draws.length ? '・穴あり' : ''}。`,
+        plan: actions ? null : r.sol.plan,
+        actions, step, draws,
+        bridge: draws.length > 0,
+        needDraw,
+        heart,
+        warps: r.sol.warps,
+        balls: nb,
+        enemies: ne,
+        level,
+        model: r.M,
+      };
     }
     return null;
   }

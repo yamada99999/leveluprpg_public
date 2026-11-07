@@ -215,7 +215,7 @@
     },
     makeHere(level, seed) {
       const r = window.URA_GEN.make(level, seed);
-      return r && { pattern: r.pattern, hint: r.hint, plan: r.plan, actions: r.actions, level: r.level };
+      return r && { pattern: r.pattern, hint: r.hint, plan: r.plan, actions: r.actions, step: r.step, draws: r.draws, needDraw: r.needDraw, level: r.level };
     },
     prefetch(floor) { this.next = { floor, p: this.make(levelFor(floor)) }; },
     get(floor) {
