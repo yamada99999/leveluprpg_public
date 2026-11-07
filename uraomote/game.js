@@ -11,6 +11,7 @@
   const LEAN = 0.4;     // 「ゆっくり」中の重力の強さ
   const CP_CONFIRM = 1.2;    // トンネルを抜けてこの秒数無事ならチェックポイント
   const RESPAWN_HOLD = 1.2;  // 復活後に玉を止めておく秒数
+  const LINE_R = 3;          // 描いた床の太さ（半分）
   // 2台の傾きのずれチェック（背中合わせで一緒に傾けていないと強制やり直し）
   const SYNC_LIMIT = 40 * Math.PI / 180; // これ以上ずれたら「ずれている」
   const SYNC_TIME = 0.6;                 // ずれがこの秒数続いたらアウト
@@ -99,7 +100,8 @@
       start();
       return Promise.resolve(true);
     },
-    live() { return this.got && now() - this.last < 1000; },
+    // 一度でも値が届けば「使える」。機種によっては動かしたときにしか値が届かないので、時間切れにはしない
+    live() { return this.got; },
   };
 
   // ---------- アプリ状態 ----------
@@ -133,7 +135,7 @@
   // ---------- 画面切り替え ----------
   function showScreen(id) {
     document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === id));
-    if (id === 'scr-play') requestAnimationFrame(fit);
+    if (id === 'scr-play') { requestAnimationFrame(fit); setTimeout(fit, 60); }
   }
   let toastTimer = 0;
   function toast(msg, ms = 2000) {
@@ -146,56 +148,78 @@
   // ---------- ゲーム ----------
   let G = null;
 
-  function buildSide(L, side, pick) {
-    const S = L[side] || {};
-    const walls = [[0, 0, W, WALL], [0, H - WALL, W, WALL], [0, 0, WALL, H], [W - WALL, 0, WALL, H], ...(S.walls || [])];
-    // seen … この面の人にだけ見える危険地帯（この面の座標）
-    const sc = (L.scenarios || [])[(pick && pick.s) || 0];
-    const seen = ((sc && sc[side]) || []).map((r) => r.slice());
-    const stars = (S.stars || []).map((s) => ({ ...s, r: s.r || 15 }));
-    // トンネルは一方通行：from の面が入口、反対の面は出口
-    const tunnels = (L.tunnels || []).map((t) => ({ id: t.id, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y, enter: (t.from || 'A') === side }));
-    return { walls, seen, danger: [], stars, tunnels };
-  }
+
   const mirrorRect = (r) => [W - r[0] - r[2], r[1], r[2], r[3]];
-  function buildSides(L, pick) {
-    const sides = { A: buildSide(L, 'A', pick), B: buildSide(L, 'B', pick) };
+  const mirrorPt = (p) => ({ ...p, x: W - p.x });
+
+  // パターンを左右反転したもの（両方の面をそろって反転するので、背中合わせの対応は崩れない）
+  function mirrorPattern(P) {
+    const face = (F) => ({ walls: (F.walls || []).map(mirrorRect), danger: (F.danger || []).map(mirrorRect) });
+    return {
+      start: mirrorPt(P.start), goal: mirrorPt(P.goal),
+      tunnels: (P.tunnels || []).map(mirrorPt),
+      A: face(P.A || {}), B: face(P.B || {}),
+    };
+  }
+  // ステージの全パターン（mirror: true なら左右反転版も加える）
+  function patternsOf(L) {
+    const base = L.patterns || [];
+    return L.mirror ? [...base, ...base.map(mirrorPattern)] : base;
+  }
+
+  function buildSide(P, side) {
+    const F = P[side] || {};
+    const walls = [[0, 0, W, WALL], [0, H - WALL, W, WALL], [0, 0, WALL, H], [W - WALL, 0, WALL, H], ...(F.walls || [])];
+    // seen … この面の人にだけ見える危険地帯（この面の座標）
+    const seen = (F.danger || []).map((r) => r.slice());
+    // ワープは一方通行：from の面が入口、反対の面は出口
+    const tunnels = (P.tunnels || []).map((t, i) => ({ id: i + 1, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y, enter: (t.from || 'A') === side }));
+    return { walls, seen, danger: [], stars: [], tunnels };
+  }
+  function buildSides(P) {
+    const sides = { A: buildSide(P, 'A'), B: buildSide(P, 'B') };
     // 危険地帯は束を貫く場所：自分に見えるものも、相棒に見えるもの（真裏）も、両方触れたらアウト
     for (const s of ['A', 'B']) sides[s].danger = [...sides[s].seen, ...sides[other(s)].seen.map(mirrorRect)];
     return sides;
   }
   function randomPick(L) {
-    const n = (L.scenarios || []).length;
-    return { s: n ? Math.floor(Math.random() * n) : 0 };
+    return { p: Math.floor(Math.random() * patternsOf(L).length) };
   }
 
   function startStage(idx, pick) {
     const L = LEVELS[idx];
+    const pats = patternsOf(L);
+    const pi = Math.min(pats.length - 1, Math.max(0, (pick && pick.p) | 0));
+    const P = pats[pi];
     App.stageSel = idx;
     G = {
-      idx, L,
-      pick,
-      sides: buildSides(L, pick),
-      goal: { ...L.goal, r: L.goal.r || 24 },
+      idx, L, P,
+      pick: { p: pi },
+      sides: buildSides(P),
+      goal: { ...P.goal, r: P.goal.r || 24 },
       collected: new Set(),
-      total: ((L.A.stars || []).length + (L.B.stars || []).length),
-      ball: { side: L.start.side, x: L.start.x, y: L.start.y, vx: 0, vy: 0, ign: null, hidden: false },
-      checkpoint: { side: L.start.side, x: L.start.x, y: L.start.y, ign: null },
+      total: 0, // ★は廃止（ゴールにたどり着くだけ）
+      lines: { A: null, B: null }, // 描いた床：lines[面] = その面に出ている床（相棒が描いたもの）
+      ball: { side: P.start.side, x: P.start.x, y: P.start.y, vx: 0, vy: 0, ign: null, hidden: false },
+      checkpoint: { side: P.start.side, x: P.start.x, y: P.start.y, ign: null },
       pendingCp: null,
       phase: 'count', count: 3, t0: 0, elapsed: 0, misses: 0,
       busy: 0, after: null, flash: null, lockToast: 0, lastBump: 0,
     };
     App.theta = 0;
+    Draw.cancel();
     $('toast').classList.remove('show');
     $('result').classList.add('hidden');
     $('menu').classList.add('hidden');
     $('hud-name').textContent = `${idx + 1}. ${L.name}`;
+    $('hud-draw').classList.toggle('hidden', !L.draw);
     buildViews();
     showScreen('scr-play');
     wakeLock();
     Snd.play('count');
     showCount('3');
   }
+
 
   const owns = () => G && App.mySides.includes(G.ball.side);
 
@@ -263,6 +287,8 @@
     for (let i = 0; i < n; i++) {
       b.x += b.vx * h; b.y += b.vy * h;
       for (const w of S.walls) collide(b, w);
+      const ln = G.lines[b.side];
+      if (ln) collideSeg(b, ln);
       b.x = clamp(b.x, WALL + R, W - WALL - R);
       b.y = clamp(b.y, WALL + R, H - WALL - R);
       if (checkObjects(b, S)) return;
@@ -289,6 +315,27 @@
     const vn = b.vx * nx + b.vy * ny;
     if (vn < 0) {
       const e = -vn > 60 ? REST : 0; // ゆっくり当たったときは跳ねさせない（床でのガタつき防止）
+      b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny;
+      if (-vn > 220 && now() - G.lastBump > 90) { G.lastBump = now(); Snd.play('bump'); }
+    }
+  }
+
+  // 描いた床（線分）との当たり判定。太さ LINE_R の棒として扱う
+  function collideSeg(b, s) {
+    const [x1, y1, x2, y2] = s;
+    const vx = x2 - x1, vy = y2 - y1;
+    const L2 = vx * vx + vy * vy || 1;
+    const t = clamp(((b.x - x1) * vx + (b.y - y1) * vy) / L2, 0, 1);
+    const cx = x1 + vx * t, cy = y1 + vy * t;
+    let dx = b.x - cx, dy = b.y - cy;
+    const d = Math.hypot(dx, dy), need = R + LINE_R;
+    if (d >= need) return;
+    let nx, ny;
+    if (d < 1e-6) { nx = -vy; ny = vx; const n = Math.hypot(nx, ny) || 1; nx /= n; ny /= n; } else { nx = dx / d; ny = dy / d; }
+    b.x += nx * (need - d); b.y += ny * (need - d);
+    const vn = b.vx * nx + b.vy * ny;
+    if (vn < 0) {
+      const e = -vn > 60 ? REST : 0;
       b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny;
       if (-vn > 220 && now() - G.lastBump > 90) { G.lastBump = now(); Snd.play('bump'); }
     }
@@ -428,10 +475,21 @@
   }
 
   // ---------- ホストの操作 ----------
-  function leaderStart(idx) {
-    const pick = randomPick(LEVELS[idx]);
+  function leaderStart(idx, pick) {
+    pick = pick || randomPick(LEVELS[idx]);
     send({ t: 'start', stage: idx, pick });
     startStage(idx, pick);
+  }
+  // 最初からやり直す（同じ形のまま）
+  function leaderRestart() {
+    if (!G) return;
+    leaderStart(G.idx, G.pick);
+  }
+  function requestRestart() {
+    if (!G) return;
+    if (!confirm('このステージを最初からやり直しますか？')) return;
+    if (App.mode === 'guest') { send({ t: 'restartReq' }); toast('やり直しをお願いしました'); }
+    else leaderRestart();
   }
   function leaderLobby() {
     send({ t: 'lobby' });
@@ -449,6 +507,13 @@
         break;
       case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick); break;
       case 'sync': if (App.mode === 'guest') resumeStage(m); break;
+      case 'line':
+        if (!G || (m.face !== 'A' && m.face !== 'B') || !Array.isArray(m.seg)) break;
+        if (!m.seg.slice(0, 4).every((n) => Number.isFinite(Number(n)))) break;
+        G.lines[m.face] = m.seg.slice(0, 4).map(Number);
+        if (App.mySides.includes(m.face)) { Snd.play('tap'); vib(30); toast('相棒があなたの画面に床を描いた！'); }
+        break;
+      case 'restartReq': if (App.mode === 'host' && G) leaderRestart(); break;
       case 'lobby': if (App.mode === 'guest') goLobby(); break;
       case 'place':
         if (!G) break;
@@ -491,9 +556,63 @@
       el.innerHTML = '<div class="vbox"><div class="vwrap"><canvas></canvas></div></div><div class="vlabel"></div>';
       box.appendChild(el);
       const canvas = el.querySelector('canvas');
-      return { side, el, box: el.querySelector('.vbox'), wrap: el.querySelector('.vwrap'), canvas, ctx: canvas.getContext('2d'), label: el.querySelector('.vlabel'), w: 0, h: 0, scale: 1, lastLabel: '' };
+      const v = { side, el, box: el.querySelector('.vbox'), wrap: el.querySelector('.vwrap'), canvas, ctx: canvas.getContext('2d'), label: el.querySelector('.vlabel'), w: 0, h: 0, scale: 1, lastLabel: '', rot: 0, k: 1 };
+      Draw.attach(v);
+      return v;
     });
   }
+
+  // ---------- 床を描く ----------
+  // 自分の画面を指でなぞると、真裏の相棒の面に「床」が出る（自分の面には出ない）。
+  // 1人1本まで（描き直すと前の床は消える）。長さは stage.draw.maxLen まで。
+  const Draw = {
+    active: null, // { view, x0, y0, x1, y1, id }（描いている面の座標）
+    cancel() { this.active = null; },
+    enabled() { return !!(G && G.L.draw && G.phase === 'play'); },
+    toWorld(v, cx, cy) {
+      const r = v.wrap.getBoundingClientRect();
+      const dx = cx - (r.left + r.width / 2), dy = cy - (r.top + r.height / 2);
+      const c = Math.cos(-v.rot), s = Math.sin(-v.rot);
+      const lx = (dx * c - dy * s) / v.k, ly = (dx * s + dy * c) / v.k;
+      return { x: clamp((lx + v.w / 2) * (W / v.w), WALL, W - WALL), y: clamp((ly + v.h / 2) * (H / v.h), WALL, H - WALL) };
+    },
+    attach(v) {
+      const cv = v.canvas;
+      cv.addEventListener('pointerdown', (e) => {
+        if (!this.enabled()) return;
+        if (!v.w) fit();
+        e.preventDefault();
+        const p = this.toWorld(v, e.clientX, e.clientY);
+        this.active = { view: v, x0: p.x, y0: p.y, x1: p.x, y1: p.y, id: e.pointerId };
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      });
+      cv.addEventListener('pointermove', (e) => {
+        const a = this.active;
+        if (!a || a.view !== v || a.id !== e.pointerId) return;
+        const p = this.toWorld(v, e.clientX, e.clientY);
+        let dx = p.x - a.x0, dy = p.y - a.y0;
+        const len = Math.hypot(dx, dy), max = G.L.draw.maxLen;
+        if (len > max) { dx *= max / len; dy *= max / len; }
+        a.x1 = a.x0 + dx; a.y1 = a.y0 + dy;
+      });
+      const finish = (e) => {
+        const a = this.active;
+        if (!a || a.view !== v || a.id !== e.pointerId) return;
+        this.active = null;
+        if (!this.enabled() || Math.hypot(a.x1 - a.x0, a.y1 - a.y0) < 24) return; // 短すぎる線は無視（タップ）
+        // 真裏の相棒の面に出す（左右反転）
+        const face = other(v.side);
+        const seg = [W - a.x0, a.y0, W - a.x1, a.y1].map((n) => Math.round(n));
+        if (!seg.every(Number.isFinite)) return;
+        G.lines[face] = seg;
+        send({ t: 'line', face, seg });
+        Snd.play('tap'); vib(20);
+        toast(App.mode === 'solo' ? `${SIDE[face].name}に床を出した` : '相棒の画面に床を出した！');
+      };
+      cv.addEventListener('pointerup', finish);
+      cv.addEventListener('pointercancel', () => { if (this.active && this.active.view === v) this.active = null; });
+    },
+  };
 
   function fit() {
     if (!App.views.length) return;
@@ -510,6 +629,7 @@
     st.style.width = vw + 'px';
     st.style.height = vh + 'px';
     st.style.transform = `translate(-50%, -50%) rotate(${-ang}deg)`;
+    App.stageRot = (-ang * Math.PI) / 180;
 
     $('pad').classList.toggle('hidden', !thetaMode());
     const hud = $('hud').offsetHeight;
@@ -540,14 +660,17 @@
         const c = Math.abs(Math.cos(th)), s = Math.abs(Math.sin(th));
         const k = Math.min(v.w / (v.w * c + v.h * s), v.h / (v.w * s + v.h * c));
         v.wrap.style.transform = `rotate(${th}rad) scale(${k})`;
-      } else if (v.wrap.style.transform) v.wrap.style.transform = '';
+        v.rot = th + (App.stageRot || 0); v.k = k;
+      } else {
+        if (v.wrap.style.transform) v.wrap.style.transform = '';
+        v.rot = App.stageRot || 0; v.k = 1;
+      }
       drawView(v);
       const here = G.ball.side === v.side;
       const lbl = `${SIDE[v.side].name}${App.mode === 'solo' ? '' : '（あなた）'}` +
         (here ? '<span class="here">● 玉はここ</span>' : '<span class="away">◌ 玉は向こう側</span>');
       if (lbl !== v.lastLabel) { v.label.innerHTML = lbl; v.lastLabel = lbl; }
     }
-    $('hud-stars').textContent = `${G.collected.size}/${G.total}`;
     $('hud-time').textContent = fmtTime(G.phase === 'count' ? 0 : G.elapsed);
     $('hud-miss').textContent = G.misses;
     const lag = App.mode !== 'solo' && Link.open && now() - App.lastRecv > 4000;
@@ -599,6 +722,30 @@
       ctx.fillStyle = C.wall; ctx.fillRect(w[0], w[1], w[2], w[3]);
       ctx.fillStyle = C.wallTop; ctx.fillRect(w[0], w[1], w[2], Math.min(3, w[3]));
     }
+
+    // 描いた床
+    ctx.save();
+    ctx.lineCap = 'round';
+    const mine = G.lines[side]; // 相棒が描いて、この面に出ている床
+    if (mine) {
+      ctx.shadowColor = '#fff3b0'; ctx.shadowBlur = 10;
+      ctx.strokeStyle = '#ffe9a0'; ctx.lineWidth = LINE_R * 2;
+      ctx.beginPath(); ctx.moveTo(mine[0], mine[1]); ctx.lineTo(mine[2], mine[3]); ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+    const given = G.lines[other(side)]; // 自分が描いて、相棒の面に出ている床（自分の画面ではうすく表示）
+    if (given && App.mySides.length === 1) {
+      ctx.strokeStyle = 'rgba(255,233,160,0.45)'; ctx.lineWidth = 3; ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(W - given[0], given[1]); ctx.lineTo(W - given[2], given[3]); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const a = Draw.active;
+    if (a && a.view === v) { // 描いている途中
+      ctx.strokeStyle = 'rgba(255,233,160,0.9)'; ctx.lineWidth = 4; ctx.setLineDash([8, 5]);
+      ctx.beginPath(); ctx.moveTo(a.x0, a.y0); ctx.lineTo(a.x1, a.y1); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
 
     // 玉
     const b = G.ball;
@@ -793,8 +940,11 @@
     if (!solo && App.netError) st += `<br><span class="ng">${App.netError}</span>`;
     $('lb-status').innerHTML = st;
 
-    const sen = Sensor.live() ? '<span class="ok">● 傾きセンサー：使えます</span>'
-      : (isTouch ? '<span class="ng">● 傾きセンサー：使えません（画面のボタンで操作）</span>' : '● 傾きセンサーなし：← →キーで操作します');
+    // センサーは「スマホが動いたとき」にだけ値が届く機種もあるので、届くまでは「確認中」にしておく（エラー扱いしない）
+    let sen;
+    if (Sensor.live()) sen = '<span class="ok">● 傾きセンサー：使えます</span>';
+    else if (!isTouch) sen = '● 傾きセンサーなし：← →キーで操作します';
+    else sen = '<span class="wait-s">● 傾きセンサー：確認中…（スマホを少し動かすと反応します）</span>';
     $('lb-sensor').innerHTML = sen;
 
     const leader = solo || host;
@@ -845,8 +995,8 @@
   // 再接続したときの再開データ（★・ミス・タイム・チェックポイントは引き継ぐ）
   function snapshot() {
     return {
-      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses,
-      elapsed: G.phase === 'clear' ? G.elapsed : G.elapsed, checkpoint: G.checkpoint, cleared: G.phase === 'clear',
+      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses, lines: G.lines,
+      elapsed: G.elapsed, checkpoint: G.checkpoint, cleared: G.phase === 'clear',
     };
   }
   function resumeStage(s) {
@@ -854,6 +1004,7 @@
     G.collected = new Set(s.collected || []);
     G.misses = s.misses || 0;
     G.resumeElapsed = s.elapsed || 0;
+    if (s.lines) G.lines = { A: s.lines.A || null, B: s.lines.B || null };
     const cp = s.checkpoint || G.checkpoint;
     G.checkpoint = cp;
     G.ball = { side: cp.side, x: cp.x, y: cp.y, vx: 0, vy: 0, ign: cp.ign, hidden: false, hold: 0 };
@@ -931,17 +1082,17 @@
 
   // リザルト・メニュー
   $('rs-next').addEventListener('click', () => leaderStart(G.idx + 1));
-  $('rs-retry').addEventListener('click', () => leaderStart(G.idx));
+  $('rs-retry').addEventListener('click', () => leaderStart(G.idx)); // リザルトの「もう一度」は形も変える
+  $('hud-restart').addEventListener('click', requestRestart);
   $('rs-lobby').addEventListener('click', leaderLobby);
   $('hud-menu').addEventListener('click', () => {
     $('mn-hint').textContent = G ? G.L.hint : '';
     const leader = App.mode !== 'guest';
-    $('mn-retry').classList.toggle('hidden', !leader);
     $('mn-lobby').classList.toggle('hidden', !leader);
     $('menu').classList.remove('hidden');
   });
   $('mn-close').addEventListener('click', () => $('menu').classList.add('hidden'));
-  $('mn-retry').addEventListener('click', () => leaderStart(G.idx));
+  $('mn-retry').addEventListener('click', () => { $('menu').classList.add('hidden'); requestRestart(); });
   $('mn-lobby').addEventListener('click', leaderLobby);
   $('mn-title').addEventListener('click', toTitle);
 
@@ -954,6 +1105,8 @@
       // 物理を手動で進める（自動テスト用）
       step(dt = 1 / 60, n = 1) { for (let i = 0; i < n; i++) update(dt); },
       start(idx, pick) { startStage(idx, pick); },
+      patterns(idx) { return patternsOf(LEVELS[idx]); },
+      setLine(face, seg) { G.lines[face] = seg; },
     };
   }
 })();

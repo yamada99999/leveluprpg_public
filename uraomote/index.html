@@ -51,8 +51,11 @@
     <p>赤い危険地帯は、スマホの束を貫いている場所です。<b>オモテでもウラでも、その場所に玉が触れたらアウト</b>（裏の面では左右反転した位置）。でも、見えるのはどちらか片方の人だけ。位置は毎回変わります。</p>
     <p>玉が見える人は「玉は今、右の棚の上！」と実況し、危険地帯が見える人は「そこから右はダメ！」と教える。<b>声をかけ合わないとクリアできません。</b></p>
 
-    <h3>⭐ クリア条件</h3>
-    <p>★を全部集めるとゴールが開きます。ゴールに玉を入れればステージクリア。</p>
+    <h3>🏁 クリア条件</h3>
+    <p>ゴールに玉を入れればステージクリア。行き詰まったら、画面右上の <b>↺</b> で最初からやり直せます。ステージの形は毎回少し変わります。</p>
+
+    <h3>✏ 床を描く（ステージ5〜）</h3>
+    <p>自分の画面を指でなぞって線を引くと、<b>真裏の相棒の画面にだけ</b>床が出ます。1人1本まで（描き直すと前の床は消える）、長さにも限りがあります。</p>
 
     <h3>⌨ PCで試すとき</h3>
     <p>傾きセンサーがないときは、<b>← →キー</b>（画面下のボタンでも可）でスマホの束を回します。<b>↓キー</b>を押している間は「寝かせる」＝ゆっくり転がります。</p>
@@ -94,10 +97,11 @@
     <header id="hud" class="hud">
       <button id="hud-menu" class="hud-btn" aria-label="メニュー">≡</button>
       <div class="hud-name" id="hud-name"></div>
-      <div class="hud-item">★ <b id="hud-stars"></b></div>
+      <div id="hud-draw" class="hud-draw hidden" title="指で線を引くと、相棒の画面に床が出ます">✏ 床</div>
       <div class="hud-item">⏱ <b id="hud-time"></b></div>
       <div class="hud-item">✖ <b id="hud-miss"></b></div>
       <div id="hud-net" class="hud-net"></div>
+      <button id="hud-restart" class="hud-btn small" aria-label="最初からやり直す" title="最初からやり直す">↺</button>
     </header>
     <div id="views" class="views"></div>
     <div id="pad" class="pad">
@@ -135,7 +139,7 @@
         <h3>メニュー</h3>
         <p id="mn-hint" class="hint"></p>
         <button id="mn-close" class="btn big">つづける</button>
-        <button id="mn-retry" class="btn">最初からやり直す</button>
+        <button id="mn-retry" class="btn">最初からやり直す（同じ形）</button>
         <button id="mn-lobby" class="btn ghost">ステージ選択へ</button>
         <button id="mn-title" class="btn ghost">タイトルへ（通信を終了）</button>
       </div>
