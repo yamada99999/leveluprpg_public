@@ -75,9 +75,9 @@
       pen = r + m;
     } else { const dd = Math.sqrt(d2); nx = dx / dd; ny = dy / dd; pen = r - dd; }
     o.x += nx * pen; o.y += ny * pen;
-    bounce(o, nx, ny, ev);
+    bounce(o, nx, ny, ev, 'wall');
   }
-  function collideSeg(o, s, ev, thick = LINE_R) {
+  function collideSeg(o, s, ev, thick = LINE_R, mat = 'line') {
     const [x1, y1, x2, y2] = s;
     const vx = x2 - x1, vy = y2 - y1, L2 = vx * vx + vy * vy || 1;
     const t = clamp(((o.x - x1) * vx + (o.y - y1) * vy) / L2, 0, 1);
@@ -87,14 +87,15 @@
     let nx, ny;
     if (d < 1e-6) { nx = -vy; ny = vx; const n = Math.hypot(nx, ny) || 1; nx /= n; ny /= n; } else { nx = dx / d; ny = dy / d; }
     o.x += nx * (need - d); o.y += ny * (need - d);
-    bounce(o, nx, ny, ev);
+    bounce(o, nx, ny, ev, mat);
   }
-  function bounce(o, nx, ny, ev) {
+  function bounce(o, nx, ny, ev, mat) {
+    o.contact = true; // 壁や床に接している（転がる音を鳴らす目安）
     const vn = o.vx * nx + o.vy * ny;
     if (vn >= 0) return;
     const e = -vn > 60 ? REST : 0; // ゆっくり当たったときは跳ねさせない（床でのガタつき防止）
     o.vx -= (1 + e) * vn * nx; o.vy -= (1 + e) * vn * ny;
-    if (ev && -vn > 220) ev.push({ type: 'bump', o });
+    if (ev && -vn > 70) ev.push({ type: 'bump', o, v: -vn, mat }); // ぶつかった強さと相手（音の大きさ・種類）
   }
 
   const active = (o) => !o.goaled && !o.dead && o.warpT <= 0;
@@ -129,6 +130,7 @@
       const nx = d > 1e-6 ? dx / d : 1, ny = d > 1e-6 ? dy / d : 0, pen = (need - d) / 2;
       a.x -= nx * pen; a.y -= ny * pen; b.x += nx * pen; b.y += ny * pen;
       const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+      if (rv < -80 && ev) ev.push({ type: 'clack', o: a, v: -rv });
       if (rv < 0) { const imp = -(1 + 0.2) * rv / 2; a.vx -= imp * nx; a.vy -= imp * ny; b.vx += imp * nx; b.vy += imp * ny; }
     }
   }
@@ -140,12 +142,13 @@
     o.vx *= d; o.vy *= d;
     let sp = Math.hypot(o.vx, o.vy);
     if (sp > MAXV) { o.vx *= MAXV / sp; o.vy *= MAXV / sp; sp = MAXV; }
+    o.contact = false;
     const n = Math.max(1, Math.ceil((sp * dt) / (R * 0.35)));
     const h = dt / n;
     for (let i = 0; i < n; i++) {
       o.x += o.vx * h; o.y += o.vy * h;
       for (const w of F.walls) collideRect(o, w, ev);
-      for (const sl of F.slopes) collideSeg(o, sl, ev, SLOPE_R);
+      for (const sl of F.slopes) collideSeg(o, sl, ev, SLOPE_R, 'slope');
       const ln = world.lines[o.side];
       if (ln) collideSeg(o, ln, ev);
       o.x = clamp(o.x, WALL + o.r, W - WALL - o.r);

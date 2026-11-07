@@ -37,34 +37,154 @@
   };
 
   // ---------- 音 ----------
+  // 効果音はすべてその場で合成する（音声ファイルなし）。
+  //  ・玉と敵の「転がる音」「ぶつかる音」は、その玉がある面の端末から鳴らす（ひとりで試すときは オモテ=左・ウラ=右 に振り分け）
+  //  ・転がる音は速さで大きさ・高さが変わる。ぶつかる音は、ぶつかった強さで大きさが変わる
+  //  ・最後にコンプレッサーを通して、大きめに鳴らしても音割れしないようにしている
   const Snd = {
-    ctx: null, muted: false,
+    ctx: null, muted: false, out: null, noise: null, rolls: new Map(),
     init() {
-      if (!this.ctx) { try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { this.ctx = null; } }
-      if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+      if (!this.ctx) {
+        try { this.setup(new (window.AudioContext || window.webkitAudioContext)()); } catch (e) { this.ctx = null; }
+      }
+      if (this.ctx && this.ctx.state === 'suspended' && this.ctx.resume) this.ctx.resume();
     },
-    tone(f, d, type = 'sine', v = 0.1, delay = 0, f2 = null) {
+    // 出口（音量・コンプレッサー）と、ぶつかる音・転がる音のもとになる雑音を用意する
+    setup(c) {
+      this.ctx = c; this.rolls = new Map();
+      const comp = c.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 8; comp.ratio.value = 6; comp.attack.value = 0.002; comp.release.value = 0.2;
+      this.out = c.createGain(); this.out.gain.value = this.muted ? 0 : 1;
+      this.out.connect(comp); comp.connect(c.destination);
+      const len = Math.floor(c.sampleRate * 2), buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      this.noise = buf;
+    },
+    setMuted(m) {
+      this.muted = m;
+      if (this.out) this.out.gain.setTargetAtTime(m ? 0 : 1, this.ctx.currentTime, 0.02);
+    },
+    dest(pan) {
+      const c = this.ctx;
+      if (!pan || !c.createStereoPanner) return this.out;
+      const p = c.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan)); p.connect(this.out);
+      return p;
+    },
+    tone(f, d, type = 'sine', v = 0.1, delay = 0, f2 = null, pan = 0) {
       const c = this.ctx; if (!c) return;
       const t = c.currentTime + delay;
       const o = c.createOscillator(), g = c.createGain();
       o.type = type; o.frequency.setValueAtTime(f, t);
       if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + d);
-      g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
-      o.connect(g).connect(c.destination); o.start(t); o.stop(t + d + 0.03);
+      g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(v, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      o.connect(g); g.connect(this.dest(pan)); o.start(t); o.stop(t + d + 0.03);
     },
-    play(n) {
+    // 雑音を帯域でしぼった短い音（コツッ・ザッ・シュッ）
+    burst(f, q, d, v, delay = 0, pan = 0, f2 = null) {
+      const c = this.ctx; if (!c) return;
+      const t = c.currentTime + delay;
+      const s = c.createBufferSource(); s.buffer = this.noise;
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = q; bp.frequency.setValueAtTime(f, t);
+      if (f2) bp.frequency.exponentialRampToValueAtTime(f2, t + d);
+      const g = c.createGain(); g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      s.connect(bp); bp.connect(g); g.connect(this.dest(pan));
+      s.start(t, Math.random() * 1.5); s.stop(t + d + 0.03);
+    },
+    // ぶつかる音。v = ぶつかった速さ、mat = wall（壁）/ slope（斜めの床）/ line（描いた床）、kind = ball / enemy
+    hit(v, mat, kind, pan = 0) {
+      if (this.muted || !this.ctx) return;
+      const a = Math.min(1, Math.max(0.15, (v - 40) / 560));
+      const r = 0.92 + Math.random() * 0.16;
+      if (kind === 'enemy') { // とげとげの敵：ガシャッ
+        this.burst(2600 * r, 2.5, 0.08, 3.2 * a, 0, pan);
+        this.burst(900 * r, 3, 0.06, 2.0 * a, 0.012, pan);
+        this.tone(120 * r, 0.12, 'square', 0.35 * a, 0, 70, pan);
+        return;
+      }
+      // 玉（ビー玉）：ゴッ（低い胴鳴り）＋ コツッ（硬い音）＋ カチッ（高い音）
+      this.tone(140 * r, 0.16, 'sine', 1.6 * a, 0, 55, pan);
+      if (mat === 'line') { // 描いた床：ポコン
+        this.tone(560 * r, 0.18, 'triangle', 0.9 * a, 0, 500, pan);
+        this.burst(1700 * r, 5, 0.05, 1.8 * a, 0, pan);
+      } else {
+        this.burst((mat === 'slope' ? 1250 : 900) * r, 2.2, 0.07, 3.4 * a, 0, pan);
+      }
+      this.tone(3000 * r, 0.05, 'sine', 0.4 * a, 0, null, pan);
+    },
+    // 玉どうし：カチン
+    clack(v, pan = 0) {
+      if (this.muted || !this.ctx) return;
+      const a = Math.min(1, Math.max(0.2, (v - 40) / 500));
+      this.tone(3300, 0.09, 'sine', 0.7 * a, 0, null, pan);
+      this.tone(4500, 0.07, 'sine', 0.45 * a, 0, null, pan);
+      this.burst(3200, 4, 0.03, 1.4 * a, 0, pan);
+    },
+    // 転がる音の声（転がるもの1つにつき1つ。ずっと鳴らしておき、音量で出し入れする）
+    voice(id, kind) {
+      let v = this.rolls.get(id);
+      if (v && v.kind === kind) return v;
+      const c = this.ctx, en = kind === 'enemy';
+      const src = c.createBufferSource(); src.buffer = this.noise; src.loop = true;
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = en ? 2.2 : 0.8; bp.frequency.value = 300;
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = en ? 3000 : 1100;
+      const g = c.createGain(); g.gain.value = 0;
+      const am = c.createGain(); am.gain.value = 0; // ゴロゴロ・ガラガラのゆれ
+      const lfo = c.createOscillator(); lfo.type = en ? 'square' : 'sine'; lfo.frequency.value = 4;
+      const hum = c.createOscillator(); hum.type = 'triangle'; hum.frequency.value = 55; // 低いうなり（玉の重さ）
+      const hg = c.createGain(); hg.gain.value = 0;
+      const pan = c.createStereoPanner ? c.createStereoPanner() : null;
+      const dst = pan || this.out;
+      if (pan) pan.connect(this.out);
+      lfo.connect(am); am.connect(g.gain);
+      src.connect(bp); bp.connect(lp); lp.connect(g); g.connect(dst);
+      hum.connect(hg); hg.connect(dst);
+      src.start(0, Math.random() * 1.5); lfo.start(); hum.start();
+      v = { src, bp, g, am, lfo, hum, hg, pan, kind };
+      this.rolls.set(id, v);
+      return v;
+    },
+    // 毎フレーム：list = [{ id, kind, spd（速さ）, on（壁や床に接している）, pan }]。list にないものは静かにする
+    roll(list) {
+      const c = this.ctx; if (!c) return;
+      const t = c.currentTime, seen = new Set();
+      for (const o of list) {
+        seen.add(o.id);
+        const v = this.voice(o.id, o.kind), en = o.kind === 'enemy';
+        const s = o.on ? Math.min(1, Math.max(0, (o.spd - 12) / 480)) : 0; // 宙を飛んでいる間は鳴らさない
+        const lv = this.muted ? 0 : Math.pow(s, 0.65) * (en ? 0.4 : 0.55);
+        v.g.gain.setTargetAtTime(lv * 0.7, t, 0.035);
+        v.am.gain.setTargetAtTime(lv * (en ? 0.55 : 0.32), t, 0.035);
+        v.lfo.frequency.setTargetAtTime(Math.max(1.5, o.spd / (en ? 10 : 80)), t, 0.05); // 1回転ごと（敵はとげの数ぶん）
+        v.bp.frequency.setTargetAtTime((en ? 800 : 170) + o.spd * (en ? 1.8 : 0.75), t, 0.05);
+        v.hum.frequency.setTargetAtTime(45 + o.spd * 0.06, t, 0.05);
+        v.hg.gain.setTargetAtTime(en ? 0 : lv * 0.22, t, 0.05);
+        if (v.pan) v.pan.pan.setTargetAtTime(Math.max(-1, Math.min(1, o.pan)), t, 0.05);
+      }
+      for (const [id, v] of this.rolls) if (!seen.has(id)) {
+        v.g.gain.setTargetAtTime(0, t, 0.03); v.am.gain.setTargetAtTime(0, t, 0.03); v.hg.gain.setTargetAtTime(0, t, 0.03);
+      }
+    },
+    play(n, pan = 0) {
       if (this.muted || !this.ctx) return;
       switch (n) {
-        case 'tap': this.tone(700, 0.05, 'triangle', 0.05); break;
-        case 'count': this.tone(660, 0.12, 'square', 0.05); break;
-        case 'go': this.tone(990, 0.3, 'square', 0.06); break;
-        case 'bump': this.tone(180, 0.06, 'triangle', 0.05); break;
-        case 'star': [988, 1319, 1760].forEach((f, i) => this.tone(f, 0.18, 'sine', 0.08, i * 0.06)); break;
-        case 'tunnel': this.tone(300, 0.4, 'sine', 0.09, 0, 1200); break;
-        case 'arrive': this.tone(1200, 0.3, 'sine', 0.07, 0, 400); break;
-        case 'fail': this.tone(400, 0.5, 'sawtooth', 0.07, 0, 80); break;
-        case 'clear': [523, 659, 784, 1046, 1319].forEach((f, i) => this.tone(f, 0.3, 'triangle', 0.09, i * 0.1)); break;
-        case 'join': this.tone(660, 0.12, 'sine', 0.07); this.tone(990, 0.2, 'sine', 0.07, 0.1); break;
+        case 'tap': this.tone(700, 0.06, 'triangle', 0.12); break;
+        case 'count': this.tone(660, 0.14, 'square', 0.1); break;
+        case 'go': this.tone(990, 0.35, 'square', 0.12); this.tone(1485, 0.3, 'triangle', 0.08, 0.02); break;
+        case 'star': [988, 1319, 1760].forEach((f, i) => this.tone(f, 0.22, 'sine', 0.2, i * 0.06, null, pan)); break;
+        case 'goal': // ゴールの穴に落ちる：コトン ＋ キラキラ
+          this.tone(220, 0.18, 'sine', 0.7, 0, 90, pan); this.burst(700, 3, 0.08, 1.2, 0, pan);
+          [988, 1319, 1760, 2349].forEach((f, i) => this.tone(f, 0.25, 'sine', 0.2, 0.08 + i * 0.06, null, pan));
+          break;
+        case 'tunnel': // 吸いこまれる：ヒュウゥン
+          this.tone(260, 0.45, 'sine', 0.45, 0, 1300, pan); this.burst(500, 1.5, 0.45, 1.6, 0, pan, 4000);
+          break;
+        case 'arrive': // 飛び出す：ポンッ
+          this.tone(1300, 0.28, 'sine', 0.4, 0, 380, pan); this.burst(2400, 1.8, 0.2, 1.4, 0, pan, 600);
+          break;
+        case 'fail': this.tone(400, 0.55, 'sawtooth', 0.25, 0, 70); this.burst(300, 0.8, 0.4, 2.2); break;
+        case 'clear': [523, 659, 784, 1046, 1319].forEach((f, i) => this.tone(f, 0.32, 'triangle', 0.2, i * 0.1)); break;
+        case 'over': [392, 330, 262, 196].forEach((f, i) => this.tone(f, 0.4, 'triangle', 0.2, i * 0.18)); break;
+        case 'join': this.tone(660, 0.12, 'sine', 0.15); this.tone(990, 0.2, 'sine', 0.15, 0.1); break;
       }
     },
   };
@@ -306,7 +426,7 @@
     G.lastState = t;
     Link.send({
       t: 'st',
-      o: G.world.objs.map((o) => [o.id, o.side, Math.round(o.x), Math.round(o.y), (o.goaled ? 1 : 0) | (o.dead ? 2 : 0) | (o.warpT > 0 ? 4 : 0)]),
+      o: G.world.objs.map((o) => [o.id, o.side, Math.round(o.x), Math.round(o.y), (o.goaled ? 1 : 0) | (o.dead ? 2 : 0) | (o.warpT > 0 ? 4 : 0) | (o.contact ? 8 : 0), Math.round(Math.hypot(o.vx, o.vy))]),
       h: Math.round(G.world.hold * 100) / 100,
     });
   }
@@ -318,6 +438,7 @@
       o.side = a[1]; o.x = a[2]; o.y = a[3];
       o.goaled = !!(a[4] & 1); o.dead = !!(a[4] & 2); o.warpT = a[4] & 4 ? 1 : 0;
       o.hidden = !!(a[4] & 7);
+      o.contact = !!(a[4] & 8); o.spd = +a[5] || 0; o.spdT = now(); // 転がる音用
     }
     G.world.hold = +m.h || 0;
   }
@@ -327,9 +448,7 @@
     for (const e of ev) {
       const o = e.o;
       switch (e.type) {
-        case 'bump':
-          if (now() - G.lastBump > 90 && (App.mode === 'solo' || App.mySides.includes(o.side))) { G.lastBump = now(); Snd.play('bump'); }
-          break;
+        case 'bump': case 'clack': hitSound(e); break;
         case 'warpIn':
           if (o.kind === 'ball') G.warpCount++;
           G.flash = { side: e.side, x: e.x, y: e.y, t: now(), type: 'tunnel' };
@@ -344,6 +463,40 @@
     }
   }
 
+  // ぶつかる音（オモテで計算 → 玉がある面の端末で鳴らす）
+  function hitSound(e) {
+    const o = e.o, t = now();
+    if (t - (o._hitT || 0) < 45) return; // 同じものが細かく何度も当たったときは間引く
+    o._hitT = t;
+    const m = { k: e.type, s: o.side, x: Math.round(o.x), v: Math.round(e.v || 0), m: e.mat || 'wall', kd: o.kind };
+    if (App.mode === 'solo' || App.mySides.includes(o.side)) playHit(m);
+    else send({ t: 'snd', ...m });
+  }
+  function playHit(m) {
+    const pan = panOf(m.s, m.x);
+    if (m.k === 'clack') Snd.clack(m.v, pan); else Snd.hit(m.v, m.m, m.kd, pan);
+    if (m.v > 520 && m.kd === 'ball') vib(12); // 強くぶつかったときは手にも伝える
+  }
+  // 音を左右どちらから出すか：ひとりで試すときは オモテ=左・ウラ=右。さらに画面の中の左右の位置で少し振る
+  function panOf(side, x) {
+    const base = App.mode === 'solo' ? (side === 'A' ? -0.45 : 0.45) : 0;
+    return base + ((x || W / 2) / W - 0.5) * 0.5;
+  }
+  // 転がる音：自分の面にあるものだけ（毎フレーム）
+  function rollSound() {
+    if (!Snd.ctx) return;
+    const list = [];
+    if (G && G.phase === 'play' && !G.paused && $('scr-play').classList.contains('active') && (App.mode === 'solo' || Link.open)) {
+      const t = now();
+      for (const o of G.world.objs) {
+        if (o.hidden || !(App.mode === 'solo' || App.mySides.includes(o.side))) continue;
+        const spd = auth() ? Math.hypot(o.vx, o.vy) : (t - (o.spdT || 0) < 250 ? o.spd || 0 : 0);
+        list.push({ id: o.id, kind: o.kind, spd, on: !!o.contact, pan: panOf(o.side, o.x) });
+      }
+    }
+    Snd.roll(list);
+  }
+
   // 効果音とお知らせ（自分の面で起きたことかどうかで言い方を変える）
   function fx(f, remote) {
     if (!remote) send({ t: 'fx', ...f });
@@ -352,14 +505,14 @@
     const what = f.kind === 'enemy' ? '👾 敵' : '玉';
     if (f.k === 'warpIn') {
       if (remote) G.flash = { side: f.side, x: f.x, y: f.y, t: now(), type: 'tunnel' };
-      Snd.play('tunnel'); vib(40);
+      if (mine) { Snd.play('tunnel', panOf(f.side, f.x)); vib(40); }
       if (!solo && mine) toast(f.kind === 'enemy' ? '👾 敵を相棒の画面に送った！' : '玉は相棒の画面へ！ 赤い危険地帯を教えてあげて');
     } else if (f.k === 'warp') {
-      Snd.play('arrive');
+      if (mine) Snd.play('arrive', panOf(f.side, W / 2));
       if (!solo && mine) toast(`${what}がこっちに来た！`);
       if (solo) toast(`${what}がワープを抜けて${SIDE[f.side].name}へ`);
     } else if (f.k === 'goal') {
-      Snd.play('star'); vib(30);
+      if (mine) { Snd.play('goal', panOf(f.side, W / 2)); vib(30); }
       if (f.left > 0) toast(`ゴール！ あと ${f.left} つ`);
     }
   }
@@ -617,6 +770,7 @@
       case 'sync': if (App.mode === 'guest') resumeStage(m); break;
       case 'st': if (App.mode === 'guest') applyState(m); break;
       case 'fx': if (G && App.mode === 'guest') fx(m, true); break;
+      case 'snd': if (G && App.mySides.includes(m.s)) playHit(m); break;
       case 'line':
         if (!G || (m.face !== 'A' && m.face !== 'B')) break;
         if (m.seg === null) { // 相棒が消しゴムで消した
@@ -1139,6 +1293,7 @@
       if (App.theta < -Math.PI) App.theta += Math.PI * 2;
     }
     if (G && $('scr-play').classList.contains('active')) { update(dt); render(); }
+    rollSound();
     netTick(t);
   }
   requestAnimationFrame(frame);
@@ -1316,7 +1471,7 @@
   const syncMute = () => { $('btn-mute').textContent = Snd.muted ? '🔇 音なし' : '🔊 音あり'; };
   syncMute();
   $('btn-mute').addEventListener('click', () => {
-    Snd.muted = !Snd.muted;
+    Snd.setMuted(!Snd.muted);
     try { localStorage.setItem('uraomote_mute', Snd.muted ? '1' : '0'); } catch (e) { /* noop */ }
     syncMute(); Snd.init(); Snd.play('tap');
   });
@@ -1399,6 +1554,7 @@
       start(idx, pick, run) { startStage({ idx, p: pick ? pick.p : 0, run: run || null }); },
       startGen(gen, run) { startStage({ idx: -1, p: 0, gen, run: run || null }); },
       makeGen(level, seed) { return GenSvc.makeHere(level, seed); },
+      Snd, rollSound,
       patterns(idx) { return patternsOf(LEVELS[idx]); },
       setLine(face, seg) { G.world.lines.A = null; G.world.lines.B = null; G.world.lines[face] = seg; }, // ペンは2人で1本
       startRun() { leaderStartRun(); },
