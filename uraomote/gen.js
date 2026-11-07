@@ -151,10 +151,48 @@
     let best = null;
     for (const [k, out] of edges) for (const e of out) if (e.goal && (best === null || dist.get(k) < dist.get(best.k))) best = { k, dir: e.dir };
     const plan = [];
-    plan.unshift({ face: nodes.get(best.k).face, dir: best.dir });
+    const at = (key) => { const n = nodes.get(key); return { x: n.x, y: n.y }; };
+    plan.unshift({ face: nodes.get(best.k).face, dir: best.dir, ...at(best.k) });
     let k = best.k;
-    while (prev.has(k)) { const pv = prev.get(k); plan.unshift({ face: pv.face, dir: pv.dir }); k = pv.k; }
+    while (prev.has(k)) { const pv = prev.get(k); plan.unshift({ face: pv.face, dir: pv.dir, ...at(pv.k) }); k = pv.k; }
     return { ok: deadEnds.length === 0, warps: dist.get(best.k), plan, deadEnds: deadEnds.length, reachable: edges.size };
+  }
+
+  // 位置から dir に進んで、最初に何かに当たるまでの距離（何もなければ一周）
+  function freeRun(M, face, x, y, dir) {
+    const rs = rooms(M.divs[face]);
+    const c = rs[roomAt(rs, y)], p = loop(c);
+    let lo = 0, hi = p.P;
+    // walk を少しずつ延ばして、最初のできごとまでの距離を調べる
+    for (let d = 20; d < p.P; d += 10) {
+      const r = walk(M, face, x, y, dir, d);
+      if (r.type !== 'corner') { hi = d; break; }
+      lo = d;
+    }
+    return { c, p, s0: xyToS(c, x, y), safe: lo };
+  }
+
+  // ハート：正解の道から「わざと逆に回して少し寄り道すると取れる」場所に置く（取ったら戻ってくる）
+  function placeHeart(M, sol, rand) {
+    const cands = [];
+    for (const st of sol.plan) {
+      const fr = freeRun(M, st.face, st.x, st.y, -st.dir);
+      if (fr.safe < 140) continue; // 寄り道できる長さが足りない
+      cands.push({ st, fr });
+    }
+    for (let tries = 0; tries < 10 && cands.length; tries++) {
+      const { st, fr } = cands[Math.floor(rand() * cands.length)];
+      const d = 60 + Math.floor(rand() * (fr.safe - 120));
+      const [x, y] = sToXY(fr.c, fr.s0 - st.dir * d);
+      const near = (q) => Math.hypot(q.x - x, q.y - y) < 60;
+      const warpPts = [];
+      for (const w of M.warps) { if (w.face === st.face) warpPts.push(warpIn(w)); if (other(w.face) === st.face) warpPts.push(warpOut(w)); }
+      if (warpPts.some(near)) continue;
+      if (M.goal.face === st.face && near(M.goal)) continue;
+      if (M.start.face === st.face && near(M.start)) continue;
+      return { side: st.face, x: Math.round(x), y: Math.round(y) };
+    }
+    return null;
   }
 
   // ---------- 生成 ----------
@@ -338,11 +376,16 @@
       const level = Math.max(6, Math.min(n, 20) - Math.floor(attempt / 150)); // 20 以降の難しさは頭打ち
       const r = tryBuild(level, rand);
       if (r) {
+        // ハートは半分くらいのステージに1つ
+        const heart = rand() < 0.5 ? placeHeart(r.M, r.sol, rand) : null;
+        const pattern = toPattern(r.M);
+        pattern.hearts = heart ? [{ id: 'h1', ...heart }] : [];
         return {
+          pattern,
           name: '自動生成',
           hint: `毎回ちがう形の自動生成ステージ。最短でワープ${r.sol.warps}回。危険地帯${r.M.dangers.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}。どこへ行っても詰まないように作ってあります。`,
-          pattern: toPattern(r.M),
           plan: r.sol.plan,
+          heart,
           warps: r.sol.warps,
           model: r.M,
         };

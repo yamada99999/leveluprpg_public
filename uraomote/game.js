@@ -171,6 +171,7 @@
     return {
       start: mirrorPt(P.start), goal: mirrorPt(P.goal),
       tunnels: (P.tunnels || []).map(mirrorPt),
+      hearts: (P.hearts || []).map(mirrorPt),
       A: face(P.A || {}), B: face(P.B || {}),
     };
   }
@@ -212,14 +213,31 @@
     return { p: Math.floor(Math.random() * patternsOf(LEVELS[idx]).length) };
   }
 
-  function startStage(idx, pick) {
+  // ---------- スコアアタック ----------
+  // ライフ3つで何階まで行けるか。階が進むほど自動生成ステージの難しさ（gen.js の difficulty）が上がる。
+  // 4階ごとに、チュートリアルのステージ2〜5（毎回ちがうパターン）が混ざる。
+  const RUN_LIVES = 3, RUN_MAX_LIVES = 5;
+  function floorSpec(f) {
+    if (f % 4 === 0) { const idx = 1 + ((f / 4 - 1) % (LEVELS.length - 1)); return { idx, pick: randomPick(idx) }; }
+    const idx = LEVELS.length - 1 + f; // 1階 → 自動生成ステージ6 相当、2階 → 7 相当…
+    return { idx, pick: randomPick(idx) };
+  }
+  const loadBest = () => { try { return JSON.parse(localStorage.getItem('uraomote_best') || 'null'); } catch (e) { return null; } };
+  const saveBest = (b) => { try { localStorage.setItem('uraomote_best', JSON.stringify(b)); } catch (e) { /* noop */ } };
+  const bestText = () => { const b = loadBest(); return b ? `自己ベスト：${b.floors}階クリア（${fmtTime(b.time)}）` : '自己ベスト：まだ記録なし'; };
+
+  function startStage(idx, pick, run) {
     const L = levelAt(idx, pick);
     const pats = patternsOf(L);
     const pi = Math.min(pats.length - 1, Math.max(0, (pick && pick.p) | 0));
     const P = pats[pi];
     App.stageSel = idx;
+    const R0 = run ? { floor: run.floor | 0 || 1, lives: run.lives | 0, time: +run.time || 0, taken: (run.taken || []).slice() } : null;
     G = {
       idx, L, P,
+      run: R0,
+      // ハートはスコアアタックだけ。同じ階で「やり直し」しても、取ったハートは復活しない
+      hearts: R0 ? (P.hearts || []).filter((h) => !R0.taken.includes(h.id)).map((h) => ({ ...h })) : [],
       pick: { p: pi, seed: pick && pick.seed },
       sides: buildSides(P),
       goal: { ...P.goal, r: P.goal.r || 24 },
@@ -238,8 +256,11 @@
     $('toast').classList.remove('show');
     $('result').classList.add('hidden');
     $('menu').classList.add('hidden');
-    $('hud-name').textContent = `${idx + 1}. ${L.name}`;
-    $('hud-draw').classList.remove('hidden');
+    $('hud-name').textContent = R0
+      ? `🏆 ${R0.floor}階${idx < LEVELS.length ? `（${L.name}）` : ''}`
+      : `${idx + 1}. ${L.name}`;
+    $('hud-life').classList.toggle('hidden', !R0);
+    $('hud-miss-wrap').classList.toggle('hidden', !!R0);
     buildViews();
     showScreen('scr-play');
     wakeLock();
@@ -381,6 +402,9 @@
         if (now() - G.lockToast > 2500) { G.lockToast = now(); toast(`🔒 ゴールはまだ閉じている（★ ${G.collected.size}/${G.total}）`); }
       }
     }
+    for (const h of G.hearts) {
+      if (!h.got && h.side === b.side && Math.hypot(b.x - h.x, b.y - h.y) < 15 + R) takeHeart(h.id, true);
+    }
     for (const r of S.danger) {
       if (rectDist(b.x, b.y, r) < R * 0.55) { fail('trap', r); return true; }
     }
@@ -402,22 +426,33 @@
     if (mine) send({ t: 'star', id });
   }
 
+  // ハート：ライフ +1（最大 RUN_MAX_LIVES）
+  function takeHeart(id, mine, lives) {
+    const h = G.hearts.find((x) => x.id === id);
+    if (!h || h.got || !G.run) return;
+    h.got = true;
+    if (!G.run.taken.includes(id)) G.run.taken.push(id);
+    G.run.lives = mine ? Math.min(RUN_MAX_LIVES, G.run.lives + 1) : (typeof lives === 'number' ? lives : G.run.lives);
+    Snd.play('star'); vib(40);
+    toast(`♥ ライフ +1（${G.run.lives}）`);
+    if (mine) send({ t: 'heart', id, lives: G.run.lives });
+  }
+
   function fail(reason = 'trap', rect = null) {
     const b = G.ball;
     G.misses++;
+    if (G.run) G.run.lives = Math.max(0, G.run.lives - 1);
     G.flash = { side: b.side, x: b.x, y: b.y, t: now(), type: 'fail' };
-    // 触れた危険地帯を、両方の画面に少しのあいだ表示する（見えていなかった人にも場所がわかるように）
-    if (rect) G.reveal = { face: b.side, rect: rect.slice(), t: now() };
     b.hidden = true;
     Snd.play('fail'); vib(250);
+    // 見えない危険地帯の場所は教えない（口で伝え合うのがこのゲームの楽しさ）
     const visible = rect && G.sides[b.side].seen.some((r) => r.join() === rect.join());
-    const owner = App.mode === 'solo' || App.mySides.includes(b.side);
-    toast(!rect ? '💥 アウト！ チェックポイントから再開'
-      : visible ? '💥 危険地帯に触れた！ チェックポイントから再開'
-      : owner && App.mode !== 'solo' ? '💥 相棒にしか見えない危険地帯に触れた！ 赤い枠の所です' : '💥 見えない危険地帯に触れた！ 赤い枠の所です', 2800);
-    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason, rect });
+    const life = G.run ? `（ライフ −1 → 残り ${G.run.lives}）` : '';
+    toast((visible ? '💥 危険地帯に触れた！' : '💥 見えない危険地帯に触れた！') + life, 2800);
+    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason, lives: G.run ? G.run.lives : null });
     G.pendingCp = null;
     G.busy = 0.9;
+    if (G.run && G.run.lives <= 0) { G.after = () => runOver(true); return; }
     G.after = () => {
       const cp = G.checkpoint;
       placeBall(cp.side, cp.x, cp.y, 0, 0, cp.ign, reason === 'desync' ? 'realign' : 'respawn');
@@ -553,18 +588,58 @@
     return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
   }
 
-  function showResult(res) {
+  function showResult(res, resumed) {
+    if (G.phase === 'clear') return;
     G.phase = 'clear';
     G.elapsed = res.time;
     Snd.play('clear'); vib([60, 40, 120]);
-    const stars = res.misses === 0 ? 3 : res.misses <= 2 ? 2 : 1;
-    $('rs-title').textContent = 'ステージクリア！';
-    $('rs-rank').textContent = '★'.repeat(stars) + '☆'.repeat(3 - stars);
-    $('rs-detail').innerHTML = `タイム ${fmtTime(res.time)}　／　ミス ${res.misses}回`;
+    const leader = App.mode !== 'guest';
+    if (G.run) {
+      if (!resumed) G.run.time += res.time; // 再接続の復元では足さない（もう足してある）
+      $('rs-title').textContent = `🏆 ${G.run.floor}階クリア！`;
+      $('rs-rank').innerHTML = lifeHtml(G.run.lives);
+      $('rs-detail').innerHTML = `この階 ${fmtTime(res.time)}　／　合計 ${fmtTime(G.run.time)}`;
+      $('rs-next').textContent = `${G.run.floor + 1}階へ ▶`;
+      $('rs-retry').classList.add('hidden');
+      $('rs-lobby').textContent = 'あきらめてロビーへ';
+    } else {
+      const stars = res.misses === 0 ? 3 : res.misses <= 2 ? 2 : 1;
+      $('rs-title').textContent = 'ステージクリア！';
+      $('rs-rank').textContent = '★'.repeat(stars) + '☆'.repeat(3 - stars);
+      $('rs-detail').innerHTML = `タイム ${fmtTime(res.time)}　／　ミス ${res.misses}回`;
+      $('rs-next').textContent = G.idx < LEVELS.length - 1 ? '次のステージへ' : '🏆 スコアアタックに挑戦！';
+      $('rs-retry').classList.remove('hidden');
+      $('rs-lobby').textContent = 'ステージ選択へ';
+    }
+    $('rs-next').classList.remove('hidden');
+    $('rs-host').classList.toggle('hidden', !leader);
+    $('rs-wait').classList.toggle('hidden', leader);
+    $('result').classList.remove('hidden');
+  }
+
+  const lifeHtml = (n) => { let s = ''; for (let i = 0; i < Math.max(RUN_LIVES, n); i++) s += i < n ? '♥' : '<span class="off">♥</span>'; return `<span class="life-big">${s}</span>`; };
+
+  // ライフが0になった（スコアアタック終了）
+  function runOver(local) {
+    if (!G || !G.run || G.phase === 'over') return;
+    if (local) send({ t: 'over' });
+    G.phase = 'over';
+    G.busy = 0; G.after = null;
+    Snd.play('over'); vib([200, 80, 200]);
+    const floors = G.run.floor - 1;
+    const time = G.run.time + G.elapsed;
+    const best = loadBest();
+    const isNew = !best || floors > best.floors || (floors === best.floors && time < best.time);
+    if (isNew && floors > 0) saveBest({ floors, time, at: Date.now() });
+    $('rs-title').textContent = 'ゲームオーバー';
+    $('rs-rank').innerHTML = `<span class="score">${floors}階クリア</span>`;
+    $('rs-detail').innerHTML = `${G.run.floor}階でライフが尽きた（合計 ${fmtTime(time)}）<br>${isNew && floors > 0 ? '🎉 自己ベスト更新！' : bestText()}`;
+    $('rs-next').textContent = 'もう一度挑戦';
+    $('rs-retry').classList.add('hidden');
+    $('rs-lobby').textContent = 'ロビーへ';
     const leader = App.mode !== 'guest';
     $('rs-host').classList.toggle('hidden', !leader);
     $('rs-wait').classList.toggle('hidden', leader);
-    $('rs-next').classList.remove('hidden'); // ステージ6からは自動生成なので、どこまでも続く
     $('result').classList.remove('hidden');
   }
 
@@ -577,15 +652,31 @@
   }
 
   // ---------- ホストの操作 ----------
-  function leaderStart(idx, pick) {
+  function leaderStart(idx, pick, run) {
     pick = pick || randomPick(idx);
-    send({ t: 'start', stage: idx, pick });
-    startStage(idx, pick);
+    send({ t: 'start', stage: idx, pick, run: run || null });
+    startStage(idx, pick, run);
   }
-  // 最初からやり直す（同じ形のまま）
-  function leaderRestart() {
+  // スコアアタックを1階から
+  function leaderStartRun() {
+    const f = floorSpec(1);
+    leaderStart(f.idx, f.pick, { floor: 1, lives: RUN_LIVES, time: 0, taken: [] });
+  }
+  // 次へ（チュートリアルなら次のステージ、スコアアタックなら次の階）
+  function leaderNext() {
     if (!G) return;
-    leaderStart(G.idx, G.pick);
+    if (G.run && G.phase === 'over') return leaderStartRun();
+    if (G.run) {
+      const f = floorSpec(G.run.floor + 1);
+      return leaderStart(f.idx, f.pick, { floor: G.run.floor + 1, lives: G.run.lives, time: G.run.time, taken: [] });
+    }
+    if (G.idx >= LEVELS.length - 1) return leaderStartRun();
+    leaderStart(G.idx + 1);
+  }
+  // 最初からやり直す（同じ形のまま。スコアアタックならライフ・取ったハートはそのまま）
+  function leaderRestart() {
+    if (!G || G.phase === 'over') return;
+    leaderStart(G.idx, G.pick, G.run ? { ...G.run, taken: G.run.taken.slice() } : null);
   }
   function requestRestart() {
     if (!G) return;
@@ -607,7 +698,7 @@
         App.partner = { k: m.k | 0, lean: !!m.lean, s: !!m.s, g: Array.isArray(m.g) ? m.g : [0, 1], t: now(), age: typeof m.age === 'number' ? m.age : 0 };
         if (App.mode === 'guest' && typeof m.th === 'number') App.theta = m.th;
         break;
-      case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick); break;
+      case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick, m.run); break;
       case 'sync': if (App.mode === 'guest') resumeStage(m); break;
       case 'line':
         if (!G || (m.face !== 'A' && m.face !== 'B')) break;
@@ -638,11 +729,13 @@
         if (!G) break;
         G.misses = m.misses;
         G.flash = { side: m.side, x: m.x, y: m.y, t: now(), type: 'fail' };
-        if (Array.isArray(m.rect) && m.rect.length === 4) G.reveal = { face: m.side, rect: m.rect.map(Number), t: now() };
+        if (G.run && typeof m.lives === 'number') G.run.lives = m.lives;
         Snd.play('fail'); vib(250);
-        toast(m.reason === 'desync' ? '🙅 2台の傾きがずれた！ 背中合わせに戻してやり直し' : '💥 相棒側で危険地帯に触れた！', 2600);
+        toast('💥 相棒側で危険地帯に触れた！' + (G.run ? `（ライフ残り ${G.run.lives}）` : ''), 2600);
         break;
       case 'clear': if (G) showResult(m); break;
+      case 'over': if (G) runOver(false); break;
+      case 'heart': if (G) takeHeart(m.id, false, m.lives); break;
     }
   }
 
@@ -744,11 +837,12 @@
     App.stageRot = (-ang * Math.PI) / 180;
 
     $('pad').classList.toggle('hidden', !thetaMode());
-    const hud = $('hud').offsetHeight;
-    const pad = $('pad').classList.contains('hidden') ? 0 : $('pad').offsetHeight;
+    // 盤面に使える広さは、上部バー・ボタン・システムのバーをよけた残り（実際のレイアウトから測る）
     const n = App.views.length;
-    const availW = vw - 12 - (n - 1) * 10;
-    const availH = vh - hud - pad - 12 - 30;
+    for (const v of App.views) { v.box.style.width = '0px'; v.box.style.height = '0px'; }
+    const vr = $('views');
+    const availW = vr.clientWidth - 12 - (n - 1) * 10;
+    const availH = vr.clientHeight - 12 - 30; // 30 は下の「玉はここ」の表示
     const cw = availW / n;
     let h = availH, w = (h * W) / H;
     if (w > cw) { w = cw; h = (w * H) / W; }
@@ -787,6 +881,11 @@
     const hasMine = App.mode === 'solo' ? !!(G.lines.A || G.lines.B) : !!G.lines[other(mySide())];
     $('hud-erase').classList.toggle('hidden', !hasMine);
     $('hud-time').textContent = fmtTime(G.phase === 'count' ? 0 : G.elapsed);
+    if (G.run) {
+      let hs = '';
+      for (let i = 0; i < Math.max(RUN_LIVES, G.run.lives); i++) hs += i < G.run.lives ? '♥' : '<span class="off">♥</span>';
+      if ($('hud-life').dataset.v !== hs) { $('hud-life').innerHTML = hs; $('hud-life').dataset.v = hs; }
+    }
     $('hud-miss').textContent = G.misses;
     const lag = App.mode !== 'solo' && Link.open && now() - App.lastRecv > 4000;
     const sd = syncDiff();
@@ -875,41 +974,19 @@
       }
     }
 
-    // 触れた危険地帯（2.5秒だけ両方の画面に表示。危険地帯は束を貫くので、裏の面では左右反転した位置）
-    const rv = G.reveal;
-    if (rv) {
-      const age = (now() - rv.t) / 1000;
-      if (age > 2.5) G.reveal = null;
-      else {
-        const r = rv.face === side ? rv.rect : mirrorRect(rv.rect);
-        const blink = Math.floor(age * 5) % 2 === 0;
-        ctx.save();
-        ctx.fillStyle = `rgba(255,60,80,${blink ? 0.45 : 0.2})`;
-        ctx.fillRect(r[0], r[1], r[2], r[3]);
-        ctx.strokeStyle = '#ff4d5e'; ctx.lineWidth = 3;
-        ctx.strokeRect(r[0] + 1.5, r[1] + 1.5, r[2] - 3, r[3] - 3);
-        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('ここが危険地帯', clamp(r[0] + r[2] / 2, 60, W - 60), r[1] > 40 ? r[1] - 6 : r[1] + r[3] + 14);
-        ctx.restore();
-      }
-    }
+    // ハート
+    for (const h of G.hearts) if (!h.got && h.side === side) drawHeart(ctx, h.x, h.y, t);
 
-    // エフェクト
+    // エフェクト（玉がある面だけ。見えない危険地帯の場所は相手の画面にも出さない）
     const f = G.flash;
     if (f) {
       const age = (now() - f.t) / 1000;
       if (age > 1.2) G.flash = null;
-      else {
-        const fx = f.side === side ? f.x : W - f.x;
+      else if (f.side === side) {
         const col = f.type === 'fail' ? '255,77,94' : '190,140,255';
         ctx.strokeStyle = `rgba(${col},${1 - age / 1.2})`;
         ctx.lineWidth = 4;
-        ctx.beginPath(); ctx.arc(fx, f.y, 14 + age * 60, 0, Math.PI * 2); ctx.stroke();
-        if (f.side !== side && f.type === 'fail') {
-          ctx.fillStyle = `rgba(255,120,130,${1 - age / 1.2})`;
-          ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-          ctx.fillText('ここでアウト！', fx, f.y - 26);
-        }
+        ctx.beginPath(); ctx.arc(f.x, f.y, 14 + age * 60, 0, Math.PI * 2); ctx.stroke();
       }
     }
   }
@@ -965,6 +1042,20 @@
     ctx.fillStyle = open ? '#d9ffe8' : 'rgba(220,220,240,0.8)';
     ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(open ? 'GOAL' : '🔒', gl.x, gl.y);
+  }
+
+  function drawHeart(ctx, x, y, t) {
+    const s = 1 + 0.1 * Math.sin(t * 6);
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(s, s);
+    ctx.shadowColor = '#ff6b8a'; ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ff4f7b';
+    ctx.beginPath();
+    ctx.moveTo(0, 12);
+    ctx.bezierCurveTo(-18, -2, -10, -16, 0, -6);
+    ctx.bezierCurveTo(10, -16, 18, -2, 0, 12);
+    ctx.fill();
+    ctx.restore();
   }
 
   function drawStar(ctx, x, y, r, t) {
@@ -1029,6 +1120,13 @@
     try { if ('wakeLock' in navigator && !wakeSentinel) { wakeSentinel = await navigator.wakeLock.request('screen'); wakeSentinel.addEventListener('release', () => { wakeSentinel = null; }); } } catch (e) { /* noop */ }
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && $('scr-play').classList.contains('active')) wakeLock(); });
+  // 全画面のときは、時計・電池・カメラのバーが上に重なる機種があるので、上に余白をとる（style.css の html.fs）
+  const syncFs = () => {
+    document.documentElement.classList.toggle('fs', !!(document.fullscreenElement || document.webkitFullscreenElement));
+    if ($('scr-play').classList.contains('active')) setTimeout(fit, 50);
+  };
+  document.addEventListener('fullscreenchange', syncFs);
+  document.addEventListener('webkitfullscreenchange', syncFs);
   function tryFullscreen() {
     if (!isTouch) return;
     const el = document.documentElement;
@@ -1084,17 +1182,14 @@
     const leader = solo || host;
     $('lb-host-area').classList.toggle('hidden', !leader);
     if (leader) {
-      const fixed = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`);
-      const gen = [];
-      for (let i = LEVELS.length; i < LEVELS.length + 15; i++) {
-        const D = window.URA_GEN.difficulty(i + 1);
-        gen.push(`<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. 自動生成<small>毎回ちがう形。ワープ約${D.chain}回${D.decoys ? '・ハズレのワープあり' : ''}</small></button>`);
-      }
-      const html = fixed.join('') + '<div class="lbl gen-h">🎲 ここから自動生成（先に進むほど手数が増える）</div>' + gen.join('');
+      if (App.stageSel >= LEVELS.length) App.stageSel = 0;
+      const html = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`).join('');
       if ($('lb-stages').dataset.html !== html) { $('lb-stages').innerHTML = html; $('lb-stages').dataset.html = html; }
       $('lb-start').disabled = !(solo || open);
+      $('lb-run').disabled = !(solo || open);
+      $('lb-best').textContent = bestText();
     }
-    $('lb-wait').textContent = guest && open ? 'オモテの人がステージを選んでスタートするのを待っています…' : '';
+    $('lb-wait').textContent = guest && open ? `オモテの人がスタートするのを待っています…（${bestText()}）` : '';
   }
   setInterval(() => { if ($('scr-lobby').classList.contains('active')) renderLobby(); }, 1000);
 
@@ -1135,12 +1230,12 @@
   // 再接続したときの再開データ（★・ミス・タイム・チェックポイントは引き継ぐ）
   function snapshot() {
     return {
-      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses, lines: G.lines,
+      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses, lines: G.lines, run: G.run, over: G.phase === 'over',
       elapsed: G.elapsed, checkpoint: G.checkpoint, cleared: G.phase === 'clear',
     };
   }
   function resumeStage(s) {
-    startStage(s.stage, s.pick);
+    startStage(s.stage, s.pick, s.run);
     G.collected = new Set(s.collected || []);
     G.misses = s.misses || 0;
     G.resumeElapsed = s.elapsed || 0;
@@ -1148,7 +1243,8 @@
     const cp = s.checkpoint || G.checkpoint;
     G.checkpoint = cp;
     G.ball = { side: cp.side, x: cp.x, y: cp.y, vx: 0, vy: 0, ign: cp.ign, hidden: false, hold: 0 };
-    if (s.cleared) showResult({ time: s.elapsed, misses: s.misses }, true);
+    if (s.over) runOver(false);
+    else if (s.cleared) showResult({ time: s.elapsed, misses: s.misses }, true);
     else toast('つながった！ チェックポイントから再開します');
   }
 
@@ -1206,6 +1302,7 @@
     App.stageSel = Number(b.dataset.i); Snd.play('tap'); renderLobby();
   });
   $('lb-start').addEventListener('click', () => { Snd.init(); leaderStart(App.stageSel); });
+  $('lb-run').addEventListener('click', () => { Snd.init(); leaderStartRun(); });
   $('lb-share').addEventListener('click', async () => {
     const url = pageUrl();
     if (navigator.share) { try { await navigator.share({ title: 'ウラオモテ迷宮', text: 'ウラオモテ迷宮で遊ぼう！', url }); } catch (e) { /* キャンセル */ } }
@@ -1221,8 +1318,8 @@
   $('nw-title').addEventListener('click', toTitle);
 
   // リザルト・メニュー
-  $('rs-next').addEventListener('click', () => leaderStart(G.idx + 1));
-  $('rs-retry').addEventListener('click', () => leaderStart(G.idx)); // リザルトの「もう一度」は形も変える
+  $('rs-next').addEventListener('click', leaderNext);
+  $('rs-retry').addEventListener('click', () => leaderStart(G.idx)); // チュートリアルの「もう一度」は形も変える
   $('hud-restart').addEventListener('click', requestRestart);
   // 消しゴム：自分が描いた床を消す
   $('hud-erase').addEventListener('click', () => {
@@ -1253,10 +1350,13 @@
       get G() { return G; },
       // 物理を手動で進める（自動テスト用）
       step(dt = 1 / 60, n = 1) { for (let i = 0; i < n; i++) update(dt); },
-      start(idx, pick) { startStage(idx, pick); },
+      start(idx, pick, run) { startStage(idx, pick, run); },
       patterns(idx, seed) { return patternsOf(levelAt(idx, { seed })); },
       level(idx, seed) { return levelAt(idx, { seed }); },
       setLine(face, seg) { G.lines[face] = seg; },
+      startRun() { leaderStartRun(); },
+      floorSpec,
+      fit,
     };
   }
 })();

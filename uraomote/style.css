@@ -115,29 +115,44 @@ h1 {
 
 /* プレイ画面 */
 #scr-play.active { position: fixed; inset: 0; overflow: hidden; }
+/* 上下は、スマホの時計・カメラ・ホームバーの部分をよける（--safe-top / --safe-bottom はテスト用の上書き） */
+:root { --top-min: 0px; --bottom-min: 0px; }
+html.fs { --top-min: 30px; --bottom-min: 12px; } /* 全画面表示中は、システムのバーが上に重なる機種がある */
 .stage {
   position: absolute; left: 50%; top: 50%;
   width: 100vw; height: 100vh;
   transform: translate(-50%, -50%);
   display: flex; flex-direction: column;
-  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  padding-top: max(var(--safe-top, env(safe-area-inset-top, 0px)), var(--top-min));
+  padding-bottom: max(var(--safe-bottom, env(safe-area-inset-bottom, 0px)), var(--bottom-min));
+  padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px);
 }
 .hud {
-  flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px; font-size: 14px; background: rgba(10,10,22,.75);
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: rgba(10,10,22,.75);
   border-bottom: 1px solid var(--line);
 }
-.hud-btn { font: inherit; font-size: 20px; background: none; border: none; color: var(--text); cursor: pointer; padding: 0 4px; }
-.hud-btn.small { font-size: 20px; width: 34px; height: 30px; border: 1px solid var(--line); border-radius: 8px; }
-.hud-draw { font-size: 12px; font-weight: 800; color: #ffe08a; border: 1px solid #806a2a; border-radius: 8px; padding: 2px 6px; white-space: nowrap; }
+/* 押せるボタン：大きめ・枠つき */
+.tool {
+  flex: none; width: 46px; height: 46px; border-radius: 14px; cursor: pointer;
+  display: grid; place-items: center; padding: 0;
+  font: inherit; font-size: 24px; font-weight: 800; color: var(--text);
+  background: #262848; border: 1.5px solid #4a4e86; box-shadow: 0 2px 0 #15162b;
+}
+.tool:active { transform: translateY(1px); box-shadow: none; }
+/* 表示だけ：小さめ・枠なし */
+.hud-info { flex: 1; min-width: 0; line-height: 1.25; }
+.hud-stats { display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.hud-stats b { color: var(--text); font-variant-numeric: tabular-nums; }
+.hud-life { color: #ff6b8a; font-size: 14px; letter-spacing: 1px; }
+.hud-life .off { opacity: .25; }
 .vwrap canvas { touch-action: none; }
 .status .wait-s { color: var(--muted); }
 .gen-h { margin: 10px 0 2px; color: #ffe08a; }
 .sw-status { font-weight: 800; color: #ffe08a; min-height: 1.4em; }
-.hud-name { flex: 1; font-weight: 800; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hud-item b { font-variant-numeric: tabular-nums; }
+.hud-name { font-weight: 800; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-net { font-size: 11px; color: var(--trap); font-weight: 800; }
-.hud-net.ok { color: var(--ok); font-size: 15px; }
+.hud-net.ok { color: var(--ok); font-size: 13px; }
 
 .views { flex: 1; min-height: 0; display: flex; justify-content: center; align-items: center; gap: 10px; padding: 6px; }
 .view { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
@@ -163,7 +178,7 @@ h1 {
 .pad-btn.on { background: #2e3160; border-color: var(--b); }
 
 .toast {
-  position: absolute; left: 50%; top: 56px; transform: translateX(-50%);
+  position: absolute; left: 50%; top: calc(66px + max(var(--safe-top, env(safe-area-inset-top, 0px)), var(--top-min))); transform: translateX(-50%);
   max-width: 92%; padding: 8px 14px; border-radius: 12px;
   background: rgba(20,20,40,.92); border: 1px solid var(--line);
   font-size: 14px; font-weight: 700; text-align: center;
@@ -187,3 +202,10 @@ h1 {
 .ov-card p { line-height: 1.6; font-size: 14.5px; }
 .rank { font-size: 34px; letter-spacing: .1em; color: #ffd84a; text-shadow: 0 0 14px rgba(255,216,74,.5); }
 .hint { color: var(--muted); font-size: 13px !important; text-align: left; }
+.run-card { border-color: #806a2a; background: linear-gradient(180deg, #2b2416, var(--panel)); }
+.run-h { font-size: 18px; font-weight: 900; color: #ffd27a; }
+.run-d { font-size: 13px; color: var(--muted); margin: 4px 0; line-height: 1.6; }
+.run-best { font-size: 14px; font-weight: 800; color: #ffe9a8; margin: 6px 0 0; }
+.life-big { font-size: 34px; color: #ff4f7b; letter-spacing: 4px; }
+.life-big .off { opacity: .2; }
+.score { font-size: 30px; color: #ffd84a; }
