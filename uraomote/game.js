@@ -878,7 +878,7 @@
     // 玉と敵（この面にいるものだけ）
     for (const o of G.world.objs) {
       if (o.side !== side || o.hidden) continue;
-      if (o.kind === 'enemy') { drawEnemy(ctx, o.x, o.y, t); continue; }
+      if (o.kind === 'enemy') { drawEnemy(ctx, o, side); continue; }
       drawBall(ctx, o.x, o.y);
       if (G.world.hold > 0) { // 復活待ちのリング
         ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 3;
@@ -957,11 +957,28 @@
   }
 
   // 敵：とげとげの紫の玉に、怒った目（ひと目で敵とわかるように）
-  function drawEnemy(ctx, x, y, t) {
-    const r = PH.ER;
+  //  ・顔はいつも「下」が重力の向き（束を回すと、顔も起き上がる）
+  //  ・トゲの体は、転がった距離のぶんだけ回る（止まっていれば回らない）
+  function drawEnemy(ctx, o, side) {
+    const r = PH.ER, x = o.x, y = o.y;
+    // 転がった分の回転：床（重力が下）で右へ動くと時計回り
+    const g = sideGravity(side);
+    if (o._lx !== undefined && o._ls === side) {
+      const dx = x - o._lx, dy = y - o._ly;
+      if (Math.hypot(dx, dy) < 80) o._roll = (o._roll || 0) + (dx * g[1] - dy * g[0]) / (r * 0.9);
+    }
+    o._lx = x; o._ly = y; o._ls = side;
+    // 顔の向き：重力の向きへなめらかに追いつく（重力がほぼ無いときは前の向きのまま）
+    if (Math.hypot(g[0], g[1]) > 0.3) {
+      const target = Math.atan2(g[1], g[0]) - Math.PI / 2;
+      const cur = o._face === undefined ? target : o._face;
+      const d = Math.atan2(Math.sin(target - cur), Math.cos(target - cur));
+      o._face = cur + d * 0.25;
+    }
+    const face = o._face || 0;
     ctx.save();
     ctx.translate(x, y);
-    ctx.rotate(t * 1.5);
+    ctx.rotate(o._roll || 0);
     ctx.shadowColor = '#ff2d6f'; ctx.shadowBlur = 12;
     ctx.fillStyle = '#e0204f';
     ctx.beginPath();
@@ -971,15 +988,15 @@
       ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
     }
     ctx.closePath(); ctx.fill();
-    ctx.shadowBlur = 0;
-    const g = ctx.createRadialGradient(-3, -4, 1, 0, 0, r);
-    g.addColorStop(0, '#b06cff'); g.addColorStop(1, '#4a1680');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
-    // 目（回転させない）
+    // 体と顔（顔の向き＝重力の向きに合わせる。光も「上」から当たる）
     ctx.save();
     ctx.translate(x, y);
+    ctx.rotate(face);
+    const body = ctx.createRadialGradient(-3, -4, 1, 0, 0, r);
+    body.addColorStop(0, '#b06cff'); body.addColorStop(1, '#4a1680');
+    ctx.fillStyle = body;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#fff';
     ctx.beginPath(); ctx.ellipse(-4.5, -1, 3.4, 3.8, 0, 0, Math.PI * 2); ctx.ellipse(4.5, -1, 3.4, 3.8, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#1a0010';
