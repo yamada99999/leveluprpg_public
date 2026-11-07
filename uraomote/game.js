@@ -13,9 +13,10 @@
   const RESPAWN_HOLD = 1.2;  // 復活後に玉を止めておく秒数
   const LINE_R = 3;          // 描いた床の太さ（半分）
   // 2台の傾きのずれチェック（背中合わせで一緒に傾けていないと強制やり直し）
-  const SYNC_LIMIT = 40 * Math.PI / 180; // これ以上ずれたら「ずれている」
-  const SYNC_TIME = 0.6;                 // ずれがこの秒数続いたらアウト
-  const SYNC_OK = 20 * Math.PI / 180;    // やり直し後、ここまでそろえば再開
+  const SYNC_LIMIT = 45 * Math.PI / 180; // これ以上ずれたら「ずれている」
+  const SYNC_TIME = 1.0;                 // ずれがこの秒数続いたら注意ポップアップ（ペナルティなし）
+  const SYNC_OK = 25 * Math.PI / 180;    // ここまでそろえば OK を押せる
+  const SYNC_LAG_MS = 450;               // 相棒の値が遅れて届く分の見込み
   const REALIGN_TIME = 0.5;
 
   const LEVELS = window.URA_LEVELS;
@@ -75,6 +76,7 @@
   // 端末に固定した座標（x右・y下）で、1 = 1G。
   const Sensor = {
     enabled: false, g: [0, 1], last: 0, got: false,
+    hist: [], // 直近1秒の傾き（通信の遅れを考えて、相棒の値と比べるときに使う）
     enable() {
       let req = null;
       try {
@@ -94,6 +96,8 @@
           this.g[1] += (gy - this.g[1]) * k;
           this.got = true;
           this.last = now();
+          this.hist.push({ t: this.last, x: this.g[0], y: this.g[1] });
+          while (this.hist.length && this.last - this.hist[0].t > 1000) this.hist.shift();
         });
       };
       if (req && req.then) return req.then((r) => { if (r === 'granted') start(); return r === 'granted'; }).catch(() => false);
@@ -102,6 +106,9 @@
     },
     // 一度でも値が届けば「使える」。機種によっては動かしたときにしか値が届かないので、時間切れにはしない
     live() { return this.got; },
+    // 今まさに値が届いているか（止まっていないか）
+    fresh() { return this.got && now() - this.last < 600; },
+    age() { return this.got ? Math.min(99999, Math.round(now() - this.last)) : 99999; },
   };
 
   // ---------- アプリ状態 ----------
@@ -110,7 +117,7 @@
     mySides: [],
     connected: false,
     theta: 0,          // キー操作のときの束の回転（オモテから見て時計回りが正）
-    partner: { k: 0, lean: false, s: false, g: [0, 1], t: 0 },
+    partner: { k: 0, lean: false, s: false, g: [0, 1], t: 0, age: 99999 },
     lastRecv: 0, lastSend: 0,
     stageSel: 0,
     views: [],
@@ -120,13 +127,19 @@
   const localLean = () => Input.keyLean || Input.btnLean;
   const mySide = () => (App.mode === 'guest' ? 'B' : 'A');
   const partnerSensor = () => App.mode !== 'solo' && App.partner.s && now() - App.partner.t < 1000;
+  const partnerFresh = () => partnerSensor() && App.partner.age < 600;
   const thetaMode = () => !Sensor.live() && !partnerSensor();
 
   // 各面の画面の中での重力（背中合わせなので、裏の面は左右が反転する）
+  // 2台は一体なので、どちらのセンサーを使っても同じ。自分のが止まっていたら相棒のを使う。
   function sideGravity(side) {
     const my = mySide();
-    if (Sensor.live()) { const g = Sensor.g; return side === my ? [g[0], g[1]] : [-g[0], g[1]]; }
-    if (partnerSensor()) { const g = App.partner.g; return side === my ? [-g[0], g[1]] : [g[0], g[1]]; }
+    const own = () => { const g = Sensor.g; return side === my ? [g[0], g[1]] : [-g[0], g[1]]; };
+    const par = () => { const g = App.partner.g; return side === my ? [-g[0], g[1]] : [g[0], g[1]]; };
+    if (Sensor.fresh()) return own();
+    if (partnerFresh()) return par();
+    if (Sensor.live()) return own();
+    if (partnerSensor()) return par();
     const m = (localLean() || (App.mode !== 'solo' && App.partner.lean)) ? LEAN : 1;
     const gx = Math.sin(App.theta) * m, gy = Math.cos(App.theta) * m;
     return side === 'A' ? [gx, gy] : [-gx, gy];
@@ -182,19 +195,32 @@
     for (const s of ['A', 'B']) sides[s].danger = [...sides[s].seen, ...sides[other(s)].seen.map(mirrorRect)];
     return sides;
   }
-  function randomPick(L) {
-    return { p: Math.floor(Math.random() * patternsOf(L).length) };
+  // ステージ6以降は自動生成（seed が同じなら2台とも同じ形になる）
+  const genCache = new Map();
+  function levelAt(idx, pick) {
+    if (idx < LEVELS.length) return LEVELS[idx];
+    const seed = (pick && pick.seed) >>> 0;
+    const key = idx + ':' + seed;
+    if (!genCache.has(key)) {
+      const g = window.URA_GEN.make(idx + 1, seed);
+      genCache.set(key, g && { name: g.name, hint: g.hint, gen: g, mirror: false, patterns: [g.pattern] });
+    }
+    return genCache.get(key) || LEVELS[LEVELS.length - 1];
+  }
+  function randomPick(idx) {
+    if (idx >= LEVELS.length) return { p: 0, seed: Math.floor(Math.random() * 0xffffffff) };
+    return { p: Math.floor(Math.random() * patternsOf(LEVELS[idx]).length) };
   }
 
   function startStage(idx, pick) {
-    const L = LEVELS[idx];
+    const L = levelAt(idx, pick);
     const pats = patternsOf(L);
     const pi = Math.min(pats.length - 1, Math.max(0, (pick && pick.p) | 0));
     const P = pats[pi];
     App.stageSel = idx;
     G = {
       idx, L, P,
-      pick: { p: pi },
+      pick: { p: pi, seed: pick && pick.seed },
       sides: buildSides(P),
       goal: { ...P.goal, r: P.goal.r || 24 },
       collected: new Set(),
@@ -208,11 +234,12 @@
     };
     App.theta = 0;
     Draw.cancel();
+    $('syncwait').classList.add('hidden');
     $('toast').classList.remove('show');
     $('result').classList.add('hidden');
     $('menu').classList.add('hidden');
     $('hud-name').textContent = `${idx + 1}. ${L.name}`;
-    $('hud-draw').classList.toggle('hidden', !L.draw);
+    $('hud-draw').classList.remove('hidden');
     buildViews();
     showScreen('scr-play');
     wakeLock();
@@ -240,6 +267,7 @@
       return;
     }
     if (G.phase !== 'play') return;
+    if (G.paused) return; // 注意ポップアップ中は止める（タイマーも止まる）
     G.elapsed = (now() - G.t0) / 1000;
     if (G.busy > 0) {
       G.busy -= dt;
@@ -247,12 +275,7 @@
       return;
     }
     if (!owns()) return;
-    // 2台の傾きがずれ続けたら強制やり直し
-    const sd = syncDiff();
-    if (!G.ball.alignWait && sd !== null && sd > SYNC_LIMIT) {
-      G.desyncT = (G.desyncT || 0) + dt;
-      if (G.desyncT >= SYNC_TIME) { G.desyncT = 0; fail('desync'); return; }
-    } else G.desyncT = 0;
+    if (checkSync(dt)) return;
     if (G.pendingCp) {
       G.pendingCp.t -= dt;
       if (G.pendingCp.t <= 0) {
@@ -359,7 +382,7 @@
       }
     }
     for (const r of S.danger) {
-      if (rectDist(b.x, b.y, r) < R * 0.55) { fail(); return true; }
+      if (rectDist(b.x, b.y, r) < R * 0.55) { fail('trap', r); return true; }
     }
     for (const t of S.tunnels) {
       if (!t.enter) continue; // 出口からは入れない
@@ -379,14 +402,20 @@
     if (mine) send({ t: 'star', id });
   }
 
-  function fail(reason = 'trap') {
+  function fail(reason = 'trap', rect = null) {
     const b = G.ball;
     G.misses++;
     G.flash = { side: b.side, x: b.x, y: b.y, t: now(), type: 'fail' };
+    // 触れた危険地帯を、両方の画面に少しのあいだ表示する（見えていなかった人にも場所がわかるように）
+    if (rect) G.reveal = { face: b.side, rect: rect.slice(), t: now() };
     b.hidden = true;
     Snd.play('fail'); vib(250);
-    toast(reason === 'desync' ? '🙅 2台の傾きがずれた！ 背中合わせに戻して、チェックポイントからやり直し' : '💥 危険地帯に触れた！ チェックポイントから再開', 2600);
-    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason });
+    const visible = rect && G.sides[b.side].seen.some((r) => r.join() === rect.join());
+    const owner = App.mode === 'solo' || App.mySides.includes(b.side);
+    toast(!rect ? '💥 アウト！ チェックポイントから再開'
+      : visible ? '💥 危険地帯に触れた！ チェックポイントから再開'
+      : owner && App.mode !== 'solo' ? '💥 相棒にしか見えない危険地帯に触れた！ 赤い枠の所です' : '💥 見えない危険地帯に触れた！ 赤い枠の所です', 2800);
+    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason, rect });
     G.pendingCp = null;
     G.busy = 0.9;
     G.after = () => {
@@ -395,18 +424,91 @@
     };
   }
 
-  // 自分の傾きと、相棒の傾き（自分の面に直したもの）の角度の差。比べられないときは null
+  // 自分の傾きと、相棒の傾き（自分の面に直したもの）の角度の差。比べられないときは null。
+  // 相棒の値は通信で少し遅れて届くので、自分の「少し前の値」とも比べて、一番近いものを使う。
   function syncDiff() {
     if (App.mode === 'solo' || params.get('nosync') === '1') return null;
     if (!Sensor.live() || !partnerSensor()) return null; // 片方にセンサーがない（PC など）ときはチェックしない
-    const a = Sensor.g, p = App.partner.g;
+    const p = App.partner.g;
     const pm = [-p[0], p[1]];
-    if (Math.hypot(a[0], a[1]) < 0.5 || Math.hypot(pm[0], pm[1]) < 0.5) return null; // 寝かせすぎで向きが不安定
-    const d = Math.atan2(a[1], a[0]) - Math.atan2(pm[1], pm[0]);
-    return Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
+    if (Math.hypot(pm[0], pm[1]) < 0.5) return null; // 寝かせすぎで向きが不安定
+    const pa = Math.atan2(pm[1], pm[0]);
+    const angle = (x, y) => { const d = Math.atan2(y, x) - pa; return Math.abs(Math.atan2(Math.sin(d), Math.cos(d))); };
+    let best = Math.hypot(Sensor.g[0], Sensor.g[1]) < 0.5 ? null : angle(Sensor.g[0], Sensor.g[1]);
+    const lag = SYNC_LAG_MS + App.partner.age;
+    for (const h of Sensor.hist) {
+      if (now() - h.t > lag || Math.hypot(h.x, h.y) < 0.5) continue;
+      const d = angle(h.x, h.y);
+      if (best === null || d < best) best = d;
+    }
+    return best;
+  }
+
+  // 傾きのずれ・センサーの停止を見張る（玉を動かしている側だけが判定して、相棒にも知らせる）
+  function checkSync(dt) {
+    if (App.mode === 'solo' || G.syncMute || G.ball.hold > 0) return false;
+    // どちらかのセンサーだけが止まっている
+    const mineStopped = Sensor.got && Sensor.age() > 2000 && partnerFresh();
+    const theirsStopped = partnerSensor() && App.partner.age > 2000 && Sensor.fresh();
+    if (mineStopped || theirsStopped) {
+      G.stallT = (G.stallT || 0) + dt;
+      if (G.stallT > 0.5) { G.stallT = 0; pauseGame('sensor', mineStopped ? mySide() : other(mySide())); return true; }
+    } else G.stallT = 0;
+    // 傾きがずれ続けている
+    const sd = syncDiff();
+    if (sd !== null && sd > SYNC_LIMIT) {
+      G.desyncT = (G.desyncT || 0) + dt;
+      if (G.desyncT >= SYNC_TIME) { G.desyncT = 0; pauseGame('desync'); return true; }
+    } else G.desyncT = 0;
+    return false;
+  }
+
+  function pauseGame(reason, who, remote) {
+    if (!G || G.paused) return;
+    G.paused = { reason, who, since: now() };
+    if (G.ball) { G.ball.vx = 0; G.ball.vy = 0; }
+    Snd.play('fail'); vib([80, 60, 80]);
+    if (!remote) send({ t: 'pause', reason, who });
+    const title = reason === 'sensor' ? '傾きセンサーが反応していません' : '2台の傾きがずれています';
+    const text = reason === 'sensor'
+      ? `${who === mySide() ? 'あなた' : '相棒'}のスマホの傾きセンサーが止まっているようです。画面を一度さわる・少し振る・ブラウザを開き直す、などを試してください。`
+      : 'スマホを背中合わせにぴったり合わせて、2人で同じように持ってください。そろったら「OK」で再開します（ペナルティはありません）。';
+    $('sw-title').textContent = title;
+    $('sw-text').textContent = text;
+    $('syncwait').classList.remove('hidden');
+  }
+
+  function resumeGame(remote, mute) {
+    if (!G || !G.paused) return;
+    if (mute) G.syncMute = true; // 「気にせず続ける」：このステージではもうチェックしない
+    const pausedFor = now() - G.paused.since;
+    G.paused = null;
+    if (G.phase === 'play') G.t0 += pausedFor;
+    G.desyncT = 0; G.stallT = 0;
+    if (G.ball) G.ball.hold = Math.max(G.ball.hold || 0, 0.8);
+    $('syncwait').classList.add('hidden');
+    if (!remote) send({ t: 'resume', mute: !!mute });
+    toast('再開！');
+  }
+
+  // ポップアップの「今そろっているか」の表示（毎フレーム）
+  function updateSyncWait() {
+    if (!G || !G.paused) return;
+    const sd = syncDiff();
+    let ok, msg;
+    if (G.paused.reason === 'sensor') {
+      ok = Sensor.got ? (Sensor.age() < 600 && (!partnerSensor() || App.partner.age < 600)) : true;
+      msg = ok ? '✅ 2台ともセンサーが動いています' : '⏳ センサーの反応を待っています…';
+    } else {
+      ok = sd === null || sd < SYNC_OK;
+      msg = sd === null ? '（比べられません）' : `ずれ ${Math.round((sd * 180) / Math.PI)}° ${ok ? '✅ そろっています' : '… もう少し'}`;
+    }
+    $('sw-status').textContent = msg;
+    $('sw-ok').disabled = !ok;
   }
 
   function enterTunnel(t) {
+    G.warpCount = (G.warpCount || 0) + 1;
     const b = G.ball, to = other(b.side);
     const exit = G.sides[to].tunnels.find((x) => x.id === t.id);
     G.flash = { side: b.side, x: t.x, y: t.y, t: now(), type: 'tunnel' };
@@ -462,7 +564,7 @@
     const leader = App.mode !== 'guest';
     $('rs-host').classList.toggle('hidden', !leader);
     $('rs-wait').classList.toggle('hidden', leader);
-    $('rs-next').classList.toggle('hidden', G.idx >= LEVELS.length - 1);
+    $('rs-next').classList.remove('hidden'); // ステージ6からは自動生成なので、どこまでも続く
     $('result').classList.remove('hidden');
   }
 
@@ -476,7 +578,7 @@
 
   // ---------- ホストの操作 ----------
   function leaderStart(idx, pick) {
-    pick = pick || randomPick(LEVELS[idx]);
+    pick = pick || randomPick(idx);
     send({ t: 'start', stage: idx, pick });
     startStage(idx, pick);
   }
@@ -502,18 +604,25 @@
     switch (m.t) {
       case 'hello': renderLobby(); break;
       case 'in':
-        App.partner = { k: m.k | 0, lean: !!m.lean, s: !!m.s, g: Array.isArray(m.g) ? m.g : [0, 1], t: now() };
+        App.partner = { k: m.k | 0, lean: !!m.lean, s: !!m.s, g: Array.isArray(m.g) ? m.g : [0, 1], t: now(), age: typeof m.age === 'number' ? m.age : 0 };
         if (App.mode === 'guest' && typeof m.th === 'number') App.theta = m.th;
         break;
       case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick); break;
       case 'sync': if (App.mode === 'guest') resumeStage(m); break;
       case 'line':
-        if (!G || (m.face !== 'A' && m.face !== 'B') || !Array.isArray(m.seg)) break;
-        if (!m.seg.slice(0, 4).every((n) => Number.isFinite(Number(n)))) break;
+        if (!G || (m.face !== 'A' && m.face !== 'B')) break;
+        if (m.seg === null) { // 相棒が消しゴムで消した
+          G.lines[m.face] = null;
+          if (App.mySides.includes(m.face)) toast('相棒が床を消した');
+          break;
+        }
+        if (!Array.isArray(m.seg) || !m.seg.slice(0, 4).every((n) => Number.isFinite(Number(n)))) break;
         G.lines[m.face] = m.seg.slice(0, 4).map(Number);
         if (App.mySides.includes(m.face)) { Snd.play('tap'); vib(30); toast('相棒があなたの画面に床を描いた！'); }
         break;
       case 'restartReq': if (App.mode === 'host' && G) leaderRestart(); break;
+      case 'pause': if (G) pauseGame(m.reason, m.who, true); break;
+      case 'resume': if (G) resumeGame(true, !!m.mute); break;
       case 'lobby': if (App.mode === 'guest') goLobby(); break;
       case 'place':
         if (!G) break;
@@ -529,6 +638,7 @@
         if (!G) break;
         G.misses = m.misses;
         G.flash = { side: m.side, x: m.x, y: m.y, t: now(), type: 'fail' };
+        if (Array.isArray(m.rect) && m.rect.length === 4) G.reveal = { face: m.side, rect: m.rect.map(Number), t: now() };
         Snd.play('fail'); vib(250);
         toast(m.reason === 'desync' ? '🙅 2台の傾きがずれた！ 背中合わせに戻してやり直し' : '💥 相棒側で危険地帯に触れた！', 2600);
         break;
@@ -541,7 +651,7 @@
     if (App.mode === 'solo' || !Link.open) return;
     if (t - App.lastSend < 50) return;
     App.lastSend = t;
-    const m = { t: 'in', k: localK(), lean: localLean(), s: Sensor.live(), g: [+Sensor.g[0].toFixed(3), +Sensor.g[1].toFixed(3)] };
+    const m = { t: 'in', k: localK(), lean: localLean(), s: Sensor.live(), age: Sensor.age(), g: [+Sensor.g[0].toFixed(3), +Sensor.g[1].toFixed(3)] };
     if (App.mode === 'host') m.th = +App.theta.toFixed(4);
     Link.send(m);
   }
@@ -568,7 +678,9 @@
   const Draw = {
     active: null, // { view, x0, y0, x1, y1, id }（描いている面の座標）
     cancel() { this.active = null; },
-    enabled() { return !!(G && G.L.draw && G.phase === 'play'); },
+    // どのステージでも描ける（ステージ5からは「描かないと渡れない」だけ）
+    enabled() { return !!(G && G.phase === 'play' && !G.paused); },
+    maxLen() { return (G && G.L.draw && G.L.draw.maxLen) || 150; },
     toWorld(v, cx, cy) {
       const r = v.wrap.getBoundingClientRect();
       const dx = cx - (r.left + r.width / 2), dy = cy - (r.top + r.height / 2);
@@ -591,7 +703,7 @@
         if (!a || a.view !== v || a.id !== e.pointerId) return;
         const p = this.toWorld(v, e.clientX, e.clientY);
         let dx = p.x - a.x0, dy = p.y - a.y0;
-        const len = Math.hypot(dx, dy), max = G.L.draw.maxLen;
+        const len = Math.hypot(dx, dy), max = this.maxLen();
         if (len > max) { dx *= max / len; dy *= max / len; }
         a.x1 = a.x0 + dx; a.y1 = a.y0 + dy;
       });
@@ -671,6 +783,9 @@
         (here ? '<span class="here">● 玉はここ</span>' : '<span class="away">◌ 玉は向こう側</span>');
       if (lbl !== v.lastLabel) { v.label.innerHTML = lbl; v.lastLabel = lbl; }
     }
+    updateSyncWait();
+    const hasMine = App.mode === 'solo' ? !!(G.lines.A || G.lines.B) : !!G.lines[other(mySide())];
+    $('hud-erase').classList.toggle('hidden', !hasMine);
     $('hud-time').textContent = fmtTime(G.phase === 'count' ? 0 : G.elapsed);
     $('hud-miss').textContent = G.misses;
     const lag = App.mode !== 'solo' && Link.open && now() - App.lastRecv > 4000;
@@ -757,6 +872,25 @@
       } else if (b.hold > 0) { // 復活待ちのリング
         ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(b.x, b.y, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (b.hold / RESPAWN_HOLD)); ctx.stroke();
+      }
+    }
+
+    // 触れた危険地帯（2.5秒だけ両方の画面に表示。危険地帯は束を貫くので、裏の面では左右反転した位置）
+    const rv = G.reveal;
+    if (rv) {
+      const age = (now() - rv.t) / 1000;
+      if (age > 2.5) G.reveal = null;
+      else {
+        const r = rv.face === side ? rv.rect : mirrorRect(rv.rect);
+        const blink = Math.floor(age * 5) % 2 === 0;
+        ctx.save();
+        ctx.fillStyle = `rgba(255,60,80,${blink ? 0.45 : 0.2})`;
+        ctx.fillRect(r[0], r[1], r[2], r[3]);
+        ctx.strokeStyle = '#ff4d5e'; ctx.lineWidth = 3;
+        ctx.strokeRect(r[0] + 1.5, r[1] + 1.5, r[2] - 3, r[3] - 3);
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('ここが危険地帯', clamp(r[0] + r[2] / 2, 60, W - 60), r[1] > 40 ? r[1] - 6 : r[1] + r[3] + 14);
+        ctx.restore();
       }
     }
 
@@ -950,7 +1084,13 @@
     const leader = solo || host;
     $('lb-host-area').classList.toggle('hidden', !leader);
     if (leader) {
-      const html = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`).join('');
+      const fixed = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`);
+      const gen = [];
+      for (let i = LEVELS.length; i < LEVELS.length + 15; i++) {
+        const D = window.URA_GEN.difficulty(i + 1);
+        gen.push(`<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. 自動生成<small>毎回ちがう形。ワープ約${D.chain}回${D.decoys ? '・ハズレのワープあり' : ''}</small></button>`);
+      }
+      const html = fixed.join('') + '<div class="lbl gen-h">🎲 ここから自動生成（先に進むほど手数が増える）</div>' + gen.join('');
       if ($('lb-stages').dataset.html !== html) { $('lb-stages').innerHTML = html; $('lb-stages').dataset.html = html; }
       $('lb-start').disabled = !(solo || open);
     }
@@ -1084,6 +1224,15 @@
   $('rs-next').addEventListener('click', () => leaderStart(G.idx + 1));
   $('rs-retry').addEventListener('click', () => leaderStart(G.idx)); // リザルトの「もう一度」は形も変える
   $('hud-restart').addEventListener('click', requestRestart);
+  // 消しゴム：自分が描いた床を消す
+  $('hud-erase').addEventListener('click', () => {
+    if (!G) return;
+    const faces = App.mode === 'solo' ? ['A', 'B'] : [other(mySide())];
+    for (const f of faces) { if (G.lines[f]) { G.lines[f] = null; send({ t: 'line', face: f, seg: null }); } }
+    Snd.play('tap'); toast('床を消した');
+  });
+  $('sw-ok').addEventListener('click', () => resumeGame(false, false));
+  $('sw-skip').addEventListener('click', () => resumeGame(false, true));
   $('rs-lobby').addEventListener('click', leaderLobby);
   $('hud-menu').addEventListener('click', () => {
     $('mn-hint').textContent = G ? G.L.hint : '';
@@ -1105,7 +1254,8 @@
       // 物理を手動で進める（自動テスト用）
       step(dt = 1 / 60, n = 1) { for (let i = 0; i < n; i++) update(dt); },
       start(idx, pick) { startStage(idx, pick); },
-      patterns(idx) { return patternsOf(LEVELS[idx]); },
+      patterns(idx, seed) { return patternsOf(levelAt(idx, { seed })); },
+      level(idx, seed) { return levelAt(idx, { seed }); },
       setLine(face, seg) { G.lines[face] = seg; },
     };
   }

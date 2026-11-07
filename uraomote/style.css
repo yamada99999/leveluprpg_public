@@ -132,6 +132,8 @@ h1 {
 .hud-draw { font-size: 12px; font-weight: 800; color: #ffe08a; border: 1px solid #806a2a; border-radius: 8px; padding: 2px 6px; white-space: nowrap; }
 .vwrap canvas { touch-action: none; }
 .status .wait-s { color: var(--muted); }
+.gen-h { margin: 10px 0 2px; color: #ffe08a; }
+.sw-status { font-weight: 800; color: #ffe08a; min-height: 1.4em; }
 .hud-name { flex: 1; font-weight: 800; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hud-item b { font-variant-numeric: tabular-nums; }
 .hud-net { font-size: 11px; color: var(--trap); font-weight: 800; }

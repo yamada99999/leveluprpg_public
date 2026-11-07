@@ -45,7 +45,7 @@
     <p>うずまきの穴に入ると、玉は<b>スマホの真裏</b>にある相棒の画面へ移ります（一方通行。点線の輪は出口で、入れません）。番号はないので、「こっち側のワープ！」「どっち？」と声で伝え合おう。</p>
 
     <h3>🤝 2台はいつも一緒に傾ける</h3>
-    <p>2台の傾きがずれると（背中合わせを離して、別々に操作すると）<b>強制的にやり直し</b>です。画面右上の 🤝 がそろっているしるし。</p>
+    <p>2台の傾きがずれたり、片方のセンサーが止まったりすると、<b>注意の画面が出て一時停止</b>します（ペナルティはありません）。そろえて「OK」を押すと再開。画面右上の 🤝 がそろっているしるし。</p>
 
     <h3>🟥 危険地帯は「片方の人にしか見えない」</h3>
     <p>赤い危険地帯は、スマホの束を貫いている場所です。<b>オモテでもウラでも、その場所に玉が触れたらアウト</b>（裏の面では左右反転した位置）。でも、見えるのはどちらか片方の人だけ。位置は毎回変わります。</p>
@@ -54,8 +54,11 @@
     <h3>🏁 クリア条件</h3>
     <p>ゴールに玉を入れればステージクリア。行き詰まったら、画面右上の <b>↺</b> で最初からやり直せます。ステージの形は毎回少し変わります。</p>
 
-    <h3>✏ 床を描く（ステージ5〜）</h3>
-    <p>自分の画面を指でなぞって線を引くと、<b>真裏の相棒の画面にだけ</b>床が出ます。1人1本まで（描き直すと前の床は消える）、長さにも限りがあります。</p>
+    <h3>✏ 床を描く（いつでも使える）</h3>
+    <p>自分の画面を指でなぞって線を引くと、<b>真裏の相棒の画面にだけ</b>床が出ます。1人1本まで（描き直すと前の床は消える）、長さにも限りがあります。画面右上の消しゴムで、自分が描いた床を消せます。ステージ5からは、床を描かないと渡れない場所が出てきます。</p>
+
+    <h3>🎲 ステージ6から</h3>
+    <p>毎回自動で作られるステージです。必ずクリアできる形になっていて、先に進むほどワープの回数や危険地帯が増えます。</p>
 
     <h3>⌨ PCで試すとき</h3>
     <p>傾きセンサーがないときは、<b>← →キー</b>（画面下のボタンでも可）でスマホの束を回します。<b>↓キー</b>を押している間は「寝かせる」＝ゆっくり転がります。</p>
@@ -98,6 +101,7 @@
       <button id="hud-menu" class="hud-btn" aria-label="メニュー">≡</button>
       <div class="hud-name" id="hud-name"></div>
       <div id="hud-draw" class="hud-draw hidden" title="指で線を引くと、相棒の画面に床が出ます">✏ 床</div>
+      <button id="hud-erase" class="hud-btn small erase hidden" aria-label="自分が描いた床を消す" title="自分が描いた床を消す"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 15.5 12.5 6l6 6L9 21.5H5.5z" fill="#ff9fb0" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/><path d="M12.5 6 15 3.5l6 6L18.5 12" fill="#ffd2da" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/><path d="M9 21.5h11" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg></button>
       <div class="hud-item">⏱ <b id="hud-time"></b></div>
       <div class="hud-item">✖ <b id="hud-miss"></b></div>
       <div id="hud-net" class="hud-net"></div>
@@ -134,6 +138,16 @@
       </div>
     </div>
 
+    <div id="syncwait" class="overlay hidden">
+      <div class="ov-card">
+        <h3 id="sw-title">2台の傾きがずれています</h3>
+        <p id="sw-text"></p>
+        <p id="sw-status" class="sw-status"></p>
+        <button id="sw-ok" class="btn big" disabled>そろった！ OK</button>
+        <button id="sw-skip" class="btn ghost small">気にせず続ける</button>
+      </div>
+    </div>
+
     <div id="menu" class="overlay hidden">
       <div class="ov-card">
         <h3>メニュー</h3>
@@ -151,6 +165,7 @@
 <script src="vendor/peerjs.min.js"></script>
 <script src="net.js"></script>
 <script src="levels.js"></script>
+<script src="gen.js"></script>
 <script src="game.js"></script>
 </body>
 </html>
