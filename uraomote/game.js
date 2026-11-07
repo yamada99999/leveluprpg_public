@@ -176,6 +176,7 @@
       enemies: P.enemies && P.enemies.map(mirrorPt),
       tunnels: (P.tunnels || []).map(mirrorPt),
       hearts: (P.hearts || []).map(mirrorPt),
+      testDraws: P.testDraws && P.testDraws.map((d) => ({ face: d.face, seg: [W - d.seg[0], d.seg[1], W - d.seg[2], d.seg[3]] })),
       A: face(P.A || {}), B: face(P.B || {}),
     };
   }
@@ -624,8 +625,10 @@
           break;
         }
         if (!Array.isArray(m.seg) || !m.seg.slice(0, 4).every((n) => Number.isFinite(Number(n)))) break;
+        const mineGone = !!G.world.lines[other(mySide())]; // 自分が描いていた床
+        G.world.lines.A = null; G.world.lines.B = null; // ペンは2人で1本：前の床は消える
         G.world.lines[m.face] = m.seg.slice(0, 4).map(Number);
-        if (App.mySides.includes(m.face)) { Snd.play('tap'); vib(30); toast('相棒があなたの画面に床を描いた！'); }
+        if (App.mySides.includes(m.face)) { Snd.play('tap'); vib(30); toast('相棒があなたの画面に床を描いた！' + (mineGone ? '（あなたの床は消えた）' : '')); }
         break;
       case 'restartReq': if (App.mode === 'host' && G) leaderRestart(); break;
       case 'pause': if (G) pauseGame(m.reason, m.who, true); break;
@@ -715,10 +718,12 @@
         const face = other(v.side);
         const seg = [W - a.x0, a.y0, W - a.x1, a.y1].map((n) => Math.round(n));
         if (!seg.every(Number.isFinite)) return;
+        const had = G.lines.A || G.lines.B;
+        G.lines.A = null; G.lines.B = null; // ペンは2人で1本：前の床（自分のでも相棒のでも）は消える
         G.lines[face] = seg;
         send({ t: 'line', face, seg });
         Snd.play('tap'); vib(20);
-        toast(App.mode === 'solo' ? `${SIDE[face].name}に床を出した` : '相棒の画面に床を出した！');
+        toast((App.mode === 'solo' ? `${SIDE[face].name}に床を出した` : '相棒の画面に床を出した！') + (had ? '（ペンは2人で1本：前の床は消えた）' : ''));
       };
       cv.addEventListener('pointerup', finish);
       cv.addEventListener('pointercancel', () => { if (this.active && this.active.view === v) this.active = null; });
@@ -827,9 +832,6 @@
     for (const w of P.walls.slice(4)) ctx.strokeRect(W - w[0] - w[2] + 0.5, w[1] + 0.5, w[2] - 1, w[3] - 1);
     ctx.restore();
 
-    // 自分にだけ見える危険地帯（自分の面でも、真裏の相棒の面でも触れたらアウト）
-    for (const r of S.seen) drawTrap(ctx, r[0], r[1], r[2], r[3], t);
-
     // トンネル
     for (const tn of S.tunnels) drawTunnel(ctx, tn, t);
 
@@ -844,6 +846,10 @@
       ctx.fillStyle = C.wall; ctx.fillRect(w[0], w[1], w[2], w[3]);
       ctx.fillStyle = C.wallTop; ctx.fillRect(w[0], w[1], w[2], Math.min(3, w[3]));
     }
+
+    // 自分にだけ見える危険地帯（自分の面でも、真裏の相棒の面でも触れたらアウト）。
+    // 壁より手前に描く：自分の面では壁の中でも、真裏の相棒の面では通り道かもしれないので
+    for (const r of S.seen) drawTrap(ctx, r[0], r[1], r[2], r[3], t);
 
     // 描いた床
     ctx.save();
@@ -1303,7 +1309,7 @@
       startGen(gen, run) { startStage({ idx: -1, p: 0, gen, run: run || null }); },
       makeGen(level, seed) { return GenSvc.makeHere(level, seed); },
       patterns(idx) { return patternsOf(LEVELS[idx]); },
-      setLine(face, seg) { G.world.lines[face] = seg; },
+      setLine(face, seg) { G.world.lines.A = null; G.world.lines.B = null; G.world.lines[face] = seg; }, // ペンは2人で1本
       startRun() { leaderStartRun(); },
       fit,
     };

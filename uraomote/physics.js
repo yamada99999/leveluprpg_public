@@ -239,7 +239,9 @@
     return { ev, th: target };
   }
   // 床を描く（その場で止まったまま。描いた床に玉が押し出されることもあるので、少し落ち着かせる）
+  // ペンは2人で1本：新しく描くと、どちらの面に出ていた床も消える
   function drawLine(world, cand, th) {
+    world.lines.A = null; world.lines.B = null;
     world.lines[cand.face] = cand.seg.slice();
     const ev = [];
     settle(world, th, ev);
@@ -280,19 +282,18 @@
     const { w: w0, bad } = startWorld(P);
     if (bad) return { ok: false, reason: 'start-fail' };
     if (w0.clear) return { ok: true, actions: [], explored: 1, step: stepAng };
-    const lk = (L) => (L.A === undefined ? '-' : L.A) + ',' + (L.B === undefined ? '-' : L.B);
-    const seen = new Set([keyOf(w0, 0, n, '-,-')]);
-    let frontier = [{ w: w0, k: 0, acts: [], L: {} }];
+    const seen = new Set([keyOf(w0, 0, n, '-')]);
+    let frontier = [{ w: w0, k: 0, acts: [], L: -1 }]; // L = いま出ている床の候補番号（-1 = なし。床は全体で1本だけ）
     let explored = 0;
     for (let depth = 0; depth < maxDepth && frontier.length; depth++) {
       const next = [];
       for (const nd of frontier) {
         const moves = [1, -1];
-        draws.forEach((c, i) => { if (nd.L[c.face] !== i) moves.push({ d: i }); });
+        draws.forEach((c, i) => { if (nd.L !== i) moves.push({ d: i }); });
         for (const mv of moves) {
           const w = cloneWorld(nd.w);
           let r, k = nd.k, L = nd.L;
-          if (typeof mv === 'object') { r = drawLine(w, draws[mv.d], k * stepAng); L = { ...L, [draws[mv.d].face]: mv.d }; }
+          if (typeof mv === 'object') { r = drawLine(w, draws[mv.d], k * stepAng); L = mv.d; }
           else { r = turn(w, k * stepAng, mv, 2, stepAng); k += mv; }
           explored++;
           if (r.ev.some((e) => e.type === 'fail')) continue;
@@ -301,7 +302,7 @@
             if (!opt.robust || robust(P, acts, { step: stepAng, draws })) return { ok: true, actions: acts, explored, step: stepAng };
             continue; // ぎりぎりの手順は採用しない（別の手順を探し続ける）
           }
-          const key = keyOf(w, k, n, lk(L));
+          const key = keyOf(w, k, n, String(L));
           if (seen.has(key)) continue;
           seen.add(key);
           next.push({ w, k, acts, L });
