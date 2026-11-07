@@ -369,24 +369,117 @@
     };
   }
 
+  // ---------- 玉を増やす・敵を置く ----------
+  // 何を足すかは難しさレベルで決める（机上のルール）
+  function extrasFor(lv, rand) {
+    let enemies = 0, balls = 1;
+    if (lv >= 9 && rand() < 0.6) enemies++;
+    if (lv >= 15 && rand() < 0.5) enemies++;
+    if (lv >= 11 && rand() < 0.55) balls++;
+    if (lv >= 16 && balls === 2 && rand() < 0.4) balls++;
+    return { balls: Math.min(balls, 3), enemies: Math.min(enemies, 2) };
+  }
+
+  // 足した玉・敵の置き場所をいくつか試し、実際の物理で「束を90°ずつ回して全部の玉をゴールに入れられるか」を調べる。
+  // 入れられる置き方が見つかったら採用（見つからなければ、その形はあきらめる）
+  function placeExtras(M, pattern, want, rand, budget) {
+    const PH = root.URA_PHYS;
+    if (!PH) return null;
+    const rs = { A: rooms(M.divs.A), B: rooms(M.divs.B) };
+    const roomKey = (face, y) => face + roomAt(rs[face], y);
+    const startRoom = roomKey(M.start.face, M.start.y);
+    const goalRoom = roomKey(M.goal.face, M.goal.y);
+    const spots = [];
+    for (const f of ['A', 'B']) rs[f].forEach((c) => { for (const x of [50, 130, 230, 310]) spots.push({ side: f, x, y: c.bottom - R }); });
+    const warpPts = (face) => M.warps.flatMap((w) => [w.face === face ? warpIn(w) : null, other(w.face) === face ? warpOut(w) : null]).filter(Boolean);
+    const okSpot = (s) => {
+      if (warpPts(s.side).some((p) => Math.hypot(p.x - s.x, p.y - s.y) < 60)) return false;
+      if (dangersOn(M, s.side).some((r) => rectDist(s.x, s.y, r) < 50)) return false;
+      if (M.goal.face === s.side && Math.hypot(M.goal.x - s.x, M.goal.y - s.y) < 70) return false;
+      return true;
+    };
+    const ballSpots = spots.filter((s) => okSpot(s) && roomKey(s.side, s.y) !== goalRoom);
+    for (let tries = 0; tries < 15; tries++) {
+      if (budget && budget.used > budget.max) return null;
+      const balls = [{ side: M.start.face, x: M.start.x, y: M.start.y }];
+      const used = new Set([startRoom]);
+      // 足す玉は、なるべく反対の面に（2人ともそれぞれ自分の玉を見るように）
+      for (let i = 1; i < want.balls; i++) {
+        const free = (s) => balls.every((b) => b.side !== s.side || Math.hypot(b.x - s.x, b.y - s.y) > 60);
+        const prefer = ballSpots.filter((s) => s.side !== M.start.face && !used.has(roomKey(s.side, s.y)) && free(s));
+        let pool = prefer.length && rand() < 0.8 ? prefer : ballSpots.filter((s) => !used.has(roomKey(s.side, s.y)) && free(s));
+        if (!pool.length) pool = ballSpots.filter(free); // 部屋が足りなければ、同じ部屋の別の場所でもよい
+        if (!pool.length) break;
+        const s = pool[Math.floor(rand() * pool.length)];
+        balls.push({ side: s.side, x: s.x, y: s.y });
+        used.add(roomKey(s.side, s.y));
+      }
+      if (balls.length < want.balls) return null;
+      // 敵は、玉と同じ部屋には置かない（スタートしたとたんにぶつかるので）
+      const enemies = [];
+      const ePool = spots.filter((s) => okSpot(s) && !used.has(roomKey(s.side, s.y)) && roomKey(s.side, s.y) !== goalRoom);
+      for (let i = 0; i < want.enemies && ePool.length; i++) {
+        const s = ePool.splice(Math.floor(rand() * ePool.length), 1)[0];
+        enemies.push({ side: s.side, x: s.x, y: s.y });
+      }
+      if (enemies.length < want.enemies) return null;
+      const P = { ...pattern, balls, enemies };
+      const res = PH.search(P, { maxStates: 600, maxDepth: 26, robust: true });
+      if (budget) budget.used += res.explored || 0;
+      if (res.ok) return { pattern: P, actions: res.actions };
+    }
+    return null;
+  }
+
   function make(n, seed) {
     const rand = rng((Math.imul(seed >>> 0, 2654435761) ^ (n * 40503)) >>> 0);
     // うまく作れないときは、少しずつ易しくして必ず作る
+    // 玉・敵の数は最初に決める。どうしても置けないときだけ、少しずつ減らす
+    const want = extrasFor(Math.min(n, 20), rand);
+    let exFails = 0;
+    // 物理の探索は重いので、使ってよい量を決めておく。使い切ったら玉・敵を1つ減らす
+    const budget = { used: 0, max: 6000 };
+    const t0 = Date.now();
+    let downgraded = 0;
     for (let attempt = 0; attempt < 2400; attempt++) {
       const level = Math.max(6, Math.min(n, 20) - Math.floor(attempt / 150)); // 20 以降の難しさは頭打ち
+      // 時間がかかりすぎたら、玉・敵を減らす（1.5秒ごとに1つ、3秒を超えたら足さない）
+      const spent = Date.now() - t0;
+      while (downgraded < Math.floor(spent / 1500) && (want.enemies > 0 || want.balls > 1)) {
+        if (want.enemies > 0) want.enemies--; else want.balls--;
+        downgraded++;
+      }
+      if (spent > 3000) { want.enemies = 0; want.balls = 1; }
       const r = tryBuild(level, rand);
       if (r) {
+        let pattern = toPattern(r.M);
+        let actions = null;
+        if (want.balls > 1 || want.enemies > 0) {
+          const ex = placeExtras(r.M, pattern, want, rand, budget);
+          if (!ex) { // この形では無理だった：別の形で作り直す
+            if (++exFails % 12 === 0 || budget.used > budget.max) {
+              if (want.enemies > 0) want.enemies--; else if (want.balls > 1) want.balls--;
+              budget.used = 0;
+            }
+            continue;
+          }
+          pattern = ex.pattern; actions = ex.actions;
+        }
         // ハートは半分くらいのステージに1つ
         const heart = rand() < 0.5 ? placeHeart(r.M, r.sol, rand) : null;
-        const pattern = toPattern(r.M);
         pattern.hearts = heart ? [{ id: 'h1', ...heart }] : [];
+        const nb = (pattern.balls || [1]).length, ne = (pattern.enemies || []).length;
         return {
           pattern,
           name: '自動生成',
-          hint: `毎回ちがう形の自動生成ステージ。最短でワープ${r.sol.warps}回。危険地帯${r.M.dangers.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}。どこへ行っても詰まないように作ってあります。`,
-          plan: r.sol.plan,
+          hint: `その場で作った迷路。${nb > 1 ? `玉${nb}つ（全部ゴールへ）・` : ''}${ne ? `敵${ne}体・` : ''}最短でワープ${r.sol.warps}回くらい。危険地帯${r.M.dangers.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}。`,
+          plan: actions ? null : r.sol.plan,
+          actions,
           heart,
           warps: r.sol.warps,
+          balls: nb,
+          enemies: ne,
+          level,
           model: r.M,
         };
       }
@@ -394,7 +487,7 @@
     return null;
   }
 
-  const api = { make, solve, difficulty, _walk: walk };
+  const api = { make, solve, difficulty, extrasFor, _walk: walk };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.URA_GEN = api;
 })(typeof window !== 'undefined' ? window : globalThis);

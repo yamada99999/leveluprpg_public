@@ -159,17 +159,21 @@
   }
 
   // ---------- ゲーム ----------
+  // 計算は「オモテ（ホスト）」か「ひとりで試す」の端末だけがまとめて行う。ウラは届いた位置を表示する。
+  // （玉が複数・敵が両面を行き来するので、1台がまとめて計算したほうが食い違わない）
   let G = null;
-
-
-  const mirrorRect = (r) => [W - r[0] - r[2], r[1], r[2], r[3]];
+  const PH = window.URA_PHYS;
+  const mirrorRect = PH.mirrorRect;
   const mirrorPt = (p) => ({ ...p, x: W - p.x });
+  const auth = () => App.mode === 'solo' || App.mode === 'host';
 
   // パターンを左右反転したもの（両方の面をそろって反転するので、背中合わせの対応は崩れない）
   function mirrorPattern(P) {
     const face = (F) => ({ walls: (F.walls || []).map(mirrorRect), danger: (F.danger || []).map(mirrorRect) });
     return {
-      start: mirrorPt(P.start), goal: mirrorPt(P.goal),
+      start: P.start && mirrorPt(P.start), goal: mirrorPt(P.goal),
+      balls: P.balls && P.balls.map(mirrorPt),
+      enemies: P.enemies && P.enemies.map(mirrorPt),
       tunnels: (P.tunnels || []).map(mirrorPt),
       hearts: (P.hearts || []).map(mirrorPt),
       A: face(P.A || {}), B: face(P.B || {}),
@@ -181,74 +185,64 @@
     return L.mirror ? [...base, ...base.map(mirrorPattern)] : base;
   }
 
-  function buildSide(P, side) {
-    const F = P[side] || {};
-    const walls = [[0, 0, W, WALL], [0, H - WALL, W, WALL], [0, 0, WALL, H], [W - WALL, 0, WALL, H], ...(F.walls || [])];
-    // seen … この面の人にだけ見える危険地帯（この面の座標）
-    const seen = (F.danger || []).map((r) => r.slice());
-    // ワープは一方通行：from の面が入口、反対の面は出口
-    const tunnels = (P.tunnels || []).map((t, i) => ({ id: i + 1, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y, enter: (t.from || 'A') === side }));
-    return { walls, seen, danger: [], stars: [], tunnels };
-  }
-  function buildSides(P) {
-    const sides = { A: buildSide(P, 'A'), B: buildSide(P, 'B') };
-    // 危険地帯は束を貫く場所：自分に見えるものも、相棒に見えるもの（真裏）も、両方触れたらアウト
-    for (const s of ['A', 'B']) sides[s].danger = [...sides[s].seen, ...sides[other(s)].seen.map(mirrorRect)];
-    return sides;
-  }
-  // ステージ6以降は自動生成（seed が同じなら2台とも同じ形になる）
-  const genCache = new Map();
-  function levelAt(idx, pick) {
-    if (idx < LEVELS.length) return LEVELS[idx];
-    const seed = (pick && pick.seed) >>> 0;
-    const key = idx + ':' + seed;
-    if (!genCache.has(key)) {
-      const g = window.URA_GEN.make(idx + 1, seed);
-      genCache.set(key, g && { name: g.name, hint: g.hint, gen: g, mirror: false, patterns: [g.pattern] });
-    }
-    return genCache.get(key) || LEVELS[LEVELS.length - 1];
-  }
-  function randomPick(idx) {
-    if (idx >= LEVELS.length) return { p: 0, seed: Math.floor(Math.random() * 0xffffffff) };
-    return { p: Math.floor(Math.random() * patternsOf(LEVELS[idx]).length) };
-  }
-
   // ---------- スコアアタック ----------
-  // ライフ3つで何階まで行けるか。階が進むほど自動生成ステージの難しさ（gen.js の difficulty）が上がる。
-  // 4階ごとに、チュートリアルのステージ2〜5（毎回ちがうパターン）が混ざる。
+  // ライフ3つで何階まで行けるか。階ごとにその場で迷路を作る（難しさレベル = 5 + 階）。
   const RUN_LIVES = 3, RUN_MAX_LIVES = 5;
-  function floorSpec(f) {
-    if (f % 4 === 0) { const idx = 1 + ((f / 4 - 1) % (LEVELS.length - 1)); return { idx, pick: randomPick(idx) }; }
-    const idx = LEVELS.length - 1 + f; // 1階 → 自動生成ステージ6 相当、2階 → 7 相当…
-    return { idx, pick: randomPick(idx) };
-  }
+  const levelFor = (floor) => 5 + floor;
   const loadBest = () => { try { return JSON.parse(localStorage.getItem('uraomote_best') || 'null'); } catch (e) { return null; } };
   const saveBest = (b) => { try { localStorage.setItem('uraomote_best', JSON.stringify(b)); } catch (e) { /* noop */ } };
   const bestText = () => { const b = loadBest(); return b ? `自己ベスト：${b.floors}階クリア（${fmtTime(b.time)}）` : '自己ベスト：まだ記録なし'; };
 
-  function startStage(idx, pick, run) {
-    const L = levelAt(idx, pick);
-    const pats = patternsOf(L);
-    const pi = Math.min(pats.length - 1, Math.max(0, (pick && pick.p) | 0));
+  // 迷路づくり（重いので、できれば裏の別スレッドで。今の階を遊んでいる間に次の階を作っておく）
+  const GenSvc = {
+    worker: null, seq: 0, waits: new Map(), next: null,
+    init() {
+      if (this.worker !== null) return;
+      try {
+        this.worker = new Worker('genworker.js');
+        this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
+        this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
+      } catch (e) { this.worker = false; }
+    },
+    make(level) {
+      this.init();
+      const seed = Math.floor(Math.random() * 0xffffffff);
+      if (this.worker) {
+        const id = ++this.seq;
+        return new Promise((res) => { this.waits.set(id, (r) => res(r || this.makeHere(level, seed))); this.worker.postMessage({ id, level, seed }); });
+      }
+      return new Promise((res) => setTimeout(() => res(this.makeHere(level, seed)), 30));
+    },
+    makeHere(level, seed) {
+      const r = window.URA_GEN.make(level, seed);
+      return r && { pattern: r.pattern, hint: r.hint, plan: r.plan, actions: r.actions, level: r.level };
+    },
+    prefetch(floor) { this.next = { floor, p: this.make(levelFor(floor)) }; },
+    get(floor) {
+      if (this.next && this.next.floor === floor) { const p = this.next.p; this.next = null; return p; }
+      return this.make(levelFor(floor));
+    },
+  };
+
+  // st = { idx（チュートリアルの番号。自動生成なら -1）, p（パターン番号）, gen（自動生成の中身）, run（スコアアタックの状態） }
+  function startStage(st) {
+    const gen = st.gen || null;
+    const L = gen ? { name: '自動生成', hint: gen.hint } : LEVELS[st.idx];
+    const pats = gen ? [gen.pattern] : patternsOf(L);
+    const pi = Math.min(pats.length - 1, Math.max(0, st.p | 0));
     const P = pats[pi];
-    App.stageSel = idx;
-    const R0 = run ? { floor: run.floor | 0 || 1, lives: run.lives | 0, time: +run.time || 0, taken: (run.taken || []).slice() } : null;
+    if (!gen) App.stageSel = st.idx;
+    const run = st.run ? { floor: st.run.floor | 0 || 1, lives: st.run.lives | 0, time: +st.run.time || 0, taken: (st.run.taken || []).slice() } : null;
+    const world = PH.makeWorld(P, { hearts: !!run, takenHearts: run ? run.taken : [] });
     G = {
-      idx, L, P,
-      run: R0,
-      // ハートはスコアアタックだけ。同じ階で「やり直し」しても、取ったハートは復活しない
-      hearts: R0 ? (P.hearts || []).filter((h) => !R0.taken.includes(h.id)).map((h) => ({ ...h })) : [],
-      pick: { p: pi, seed: pick && pick.seed },
-      sides: buildSides(P),
-      goal: { ...P.goal, r: P.goal.r || 24 },
-      collected: new Set(),
-      total: 0, // ★は廃止（ゴールにたどり着くだけ）
-      lines: { A: null, B: null }, // 描いた床：lines[面] = その面に出ている床（相棒が描いたもの）
-      ball: { side: P.start.side, x: P.start.x, y: P.start.y, vx: 0, vy: 0, ign: null, hidden: false },
-      checkpoint: { side: P.start.side, x: P.start.x, y: P.start.y, ign: null },
-      pendingCp: null,
+      st: { idx: st.idx, p: pi, gen, run: st.run || null },
+      idx: st.idx, L, P, run, world,
+      // 以前の名前でも使えるように（描画・テスト用）
+      sides: world.faces, goal: world.goal, lines: world.lines, hearts: world.hearts,
+      get ball() { return world.objs.find((o) => o.kind === 'ball' && !o.goaled) || world.objs[0]; },
+      collected: new Set(), total: 0,
       phase: 'count', count: 3, t0: 0, elapsed: 0, misses: 0,
-      busy: 0, after: null, flash: null, lockToast: 0, lastBump: 0,
+      busy: 0, after: null, flash: null, lastBump: 0, warpCount: 0, lastState: 0,
     };
     App.theta = 0;
     Draw.cancel();
@@ -256,22 +250,20 @@
     $('toast').classList.remove('show');
     $('result').classList.add('hidden');
     $('menu').classList.add('hidden');
-    $('hud-name').textContent = R0
-      ? `🏆 ${R0.floor}階${idx < LEVELS.length ? `（${L.name}）` : ''}`
-      : `${idx + 1}. ${L.name}`;
-    $('hud-life').classList.toggle('hidden', !R0);
-    $('hud-miss-wrap').classList.toggle('hidden', !!R0);
+    $('hud-name').textContent = run ? `🏆 ${run.floor}階` : `${st.idx + 1}. ${L.name}`;
+    $('hud-life').classList.toggle('hidden', !run);
+    $('hud-miss-wrap').classList.toggle('hidden', !!run);
     buildViews();
     showScreen('scr-play');
     wakeLock();
     Snd.play('count');
     showCount('3');
+    // スコアアタック中は、次の階を今のうちに作っておく
+    if (run && App.mode !== 'guest') GenSvc.prefetch(run.floor + 1);
   }
 
-
-  const owns = () => G && App.mySides.includes(G.ball.side);
-
   function send(m) { if (App.mode !== 'solo') Link.send(m); }
+  const ballsOn = (side) => G.world.objs.filter((o) => o.kind === 'ball' && o.side === side && !o.goaled).length;
 
   function update(dt) {
     if (App.mode !== 'solo' && !Link.open) return; // 通信が切れている間は一時停止
@@ -282,8 +274,10 @@
       if (G.count <= 0) {
         G.phase = 'play'; G.t0 = now() - (G.resumeElapsed || 0) * 1000;
         Snd.play('go'); showCount('GO!', 600);
-        if (owns()) toast('玉はあなたの画面にあります');
-        else toast('玉は相棒の画面。赤い危険地帯を教えてあげて！');
+        if (App.mode !== 'solo') {
+          const n = ballsOn(mySide()), all = G.world.objs.filter((o) => o.kind === 'ball').length;
+          toast(n ? `玉${all > 1 ? `${n}つ` : ''}があなたの画面にあります${all > n ? '（相棒の画面にも！）' : ''}` : '玉は相棒の画面。赤い危険地帯を教えてあげて！');
+        }
       } else if (c !== prev) { Snd.play('count'); showCount(String(c)); }
       return;
     }
@@ -295,168 +289,114 @@
       if (G.busy <= 0 && G.after) { const f = G.after; G.after = null; f(); }
       return;
     }
-    if (!owns()) return;
+    if (!auth()) return; // ウラは、オモテから届く位置を表示するだけ
     if (checkSync(dt)) return;
-    if (G.pendingCp) {
-      G.pendingCp.t -= dt;
-      if (G.pendingCp.t <= 0) {
-        const { side, x, y, ign } = G.pendingCp;
-        G.checkpoint = { side, x, y, ign };
-        G.pendingCp = null;
-        send({ t: 'cp', cp: G.checkpoint });
+    const ev = [];
+    PH.step(G.world, sideGravity, dt, ev);
+    handleEvents(ev);
+    sendState(false);
+  }
+
+  // 計算した結果をウラへ送る（1秒に30回くらい）
+  function sendState(force) {
+    if (App.mode !== 'host' || !Link.open) return;
+    const t = now();
+    if (!force && t - G.lastState < 33) return;
+    G.lastState = t;
+    Link.send({
+      t: 'st',
+      o: G.world.objs.map((o) => [o.id, o.side, Math.round(o.x), Math.round(o.y), (o.goaled ? 1 : 0) | (o.dead ? 2 : 0) | (o.warpT > 0 ? 4 : 0)]),
+      h: Math.round(G.world.hold * 100) / 100,
+    });
+  }
+  function applyState(m) {
+    if (!G || !Array.isArray(m.o)) return;
+    for (const a of m.o) {
+      const o = G.world.objs.find((x) => x.id === a[0]);
+      if (!o) continue;
+      o.side = a[1]; o.x = a[2]; o.y = a[3];
+      o.goaled = !!(a[4] & 1); o.dead = !!(a[4] & 2); o.warpT = a[4] & 4 ? 1 : 0;
+      o.hidden = !!(a[4] & 7);
+    }
+    G.world.hold = +m.h || 0;
+  }
+
+  // 起きたことの音・表示（計算している端末で呼ぶ。ウラへは fx / fail などで知らせる）
+  function handleEvents(ev) {
+    for (const e of ev) {
+      const o = e.o;
+      switch (e.type) {
+        case 'bump':
+          if (now() - G.lastBump > 90 && (App.mode === 'solo' || App.mySides.includes(o.side))) { G.lastBump = now(); Snd.play('bump'); }
+          break;
+        case 'warpIn':
+          if (o.kind === 'ball') G.warpCount++;
+          G.flash = { side: e.side, x: e.x, y: e.y, t: now(), type: 'tunnel' };
+          fx({ k: 'warpIn', kind: o.kind, side: e.side, x: e.x, y: e.y });
+          break;
+        case 'warp': fx({ k: 'warp', kind: o.kind, side: o.side }); break;
+        case 'goal': fx({ k: 'goal', side: o.side, left: G.world.objs.filter((b) => b.kind === 'ball' && !b.goaled).length }); break;
+        case 'clear': clearStage(); return;
+        case 'heart': gotHeart(e.h.id, true); break;
+        case 'fail': failed(o, e.reason, e.rect); return;
       }
     }
-    stepBall(dt);
   }
 
-  function stepBall(dt) {
-    const b = G.ball, S = G.sides[b.side];
-    if (b.alignWait) { // ずれでやり直したあとは、2台がそろうまで玉を止めておく
-      const sd = syncDiff();
-      b.vx = 0; b.vy = 0;
-      if (sd === null || sd < SYNC_OK) { b.alignT = (b.alignT || 0) + dt; if (b.alignT >= REALIGN_TIME) { b.alignWait = false; b.hold = 0.5; toast('そろった！ 再開'); } }
-      else b.alignT = 0;
-      return;
+  // 効果音とお知らせ（自分の面で起きたことかどうかで言い方を変える）
+  function fx(f, remote) {
+    if (!remote) send({ t: 'fx', ...f });
+    const mine = App.mode === 'solo' || App.mySides.includes(f.side);
+    const solo = App.mode === 'solo';
+    const what = f.kind === 'enemy' ? '👾 敵' : '玉';
+    if (f.k === 'warpIn') {
+      if (remote) G.flash = { side: f.side, x: f.x, y: f.y, t: now(), type: 'tunnel' };
+      Snd.play('tunnel'); vib(40);
+      if (!solo && mine) toast(f.kind === 'enemy' ? '👾 敵を相棒の画面に送った！' : '玉は相棒の画面へ！ 赤い危険地帯を教えてあげて');
+    } else if (f.k === 'warp') {
+      Snd.play('arrive');
+      if (!solo && mine) toast(`${what}がこっちに来た！`);
+      if (solo) toast(`${what}がワープを抜けて${SIDE[f.side].name}へ`);
+    } else if (f.k === 'goal') {
+      Snd.play('star'); vib(30);
+      if (f.left > 0) toast(`ゴール！ あと ${f.left} つ`);
     }
-    if (b.hold > 0) { b.hold -= dt; b.vx = 0; b.vy = 0; return; } // 復活直後は少し待つ（束をまっすぐに戻す時間）
-    const g = sideGravity(b.side);
-    b.vx += g[0] * G_ACC * dt;
-    b.vy += g[1] * G_ACC * dt;
-    const d = Math.max(0, 1 - DAMP * dt);
-    b.vx *= d; b.vy *= d;
-    let sp = Math.hypot(b.vx, b.vy);
-    if (sp > MAXV) { b.vx *= MAXV / sp; b.vy *= MAXV / sp; sp = MAXV; }
-    const n = Math.max(1, Math.ceil((sp * dt) / (R * 0.35)));
-    const h = dt / n;
-    for (let i = 0; i < n; i++) {
-      b.x += b.vx * h; b.y += b.vy * h;
-      for (const w of S.walls) collide(b, w);
-      const ln = G.lines[b.side];
-      if (ln) collideSeg(b, ln);
-      b.x = clamp(b.x, WALL + R, W - WALL - R);
-      b.y = clamp(b.y, WALL + R, H - WALL - R);
-      if (checkObjects(b, S)) return;
-    }
-  }
-
-  function collide(b, w) {
-    const [x, y, ww, hh] = w;
-    const cx = clamp(b.x, x, x + ww), cy = clamp(b.y, y, y + hh);
-    const dx = b.x - cx, dy = b.y - cy;
-    const d2 = dx * dx + dy * dy;
-    if (d2 >= R * R) return;
-    let nx, ny, pen;
-    if (d2 < 1e-9) { // 中心が壁の中：一番近い辺から押し出す
-      const l = b.x - x, r = x + ww - b.x, t = b.y - y, bo = y + hh - b.y;
-      const m = Math.min(l, r, t, bo);
-      if (m === l) { nx = -1; ny = 0; } else if (m === r) { nx = 1; ny = 0; } else if (m === t) { nx = 0; ny = -1; } else { nx = 0; ny = 1; }
-      pen = R + m;
-    } else {
-      const dd = Math.sqrt(d2);
-      nx = dx / dd; ny = dy / dd; pen = R - dd;
-    }
-    b.x += nx * pen; b.y += ny * pen;
-    const vn = b.vx * nx + b.vy * ny;
-    if (vn < 0) {
-      const e = -vn > 60 ? REST : 0; // ゆっくり当たったときは跳ねさせない（床でのガタつき防止）
-      b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny;
-      if (-vn > 220 && now() - G.lastBump > 90) { G.lastBump = now(); Snd.play('bump'); }
-    }
-  }
-
-  // 描いた床（線分）との当たり判定。太さ LINE_R の棒として扱う
-  function collideSeg(b, s) {
-    const [x1, y1, x2, y2] = s;
-    const vx = x2 - x1, vy = y2 - y1;
-    const L2 = vx * vx + vy * vy || 1;
-    const t = clamp(((b.x - x1) * vx + (b.y - y1) * vy) / L2, 0, 1);
-    const cx = x1 + vx * t, cy = y1 + vy * t;
-    let dx = b.x - cx, dy = b.y - cy;
-    const d = Math.hypot(dx, dy), need = R + LINE_R;
-    if (d >= need) return;
-    let nx, ny;
-    if (d < 1e-6) { nx = -vy; ny = vx; const n = Math.hypot(nx, ny) || 1; nx /= n; ny /= n; } else { nx = dx / d; ny = dy / d; }
-    b.x += nx * (need - d); b.y += ny * (need - d);
-    const vn = b.vx * nx + b.vy * ny;
-    if (vn < 0) {
-      const e = -vn > 60 ? REST : 0;
-      b.vx -= (1 + e) * vn * nx; b.vy -= (1 + e) * vn * ny;
-      if (-vn > 220 && now() - G.lastBump > 90) { G.lastBump = now(); Snd.play('bump'); }
-    }
-  }
-
-  function rectDist(px, py, r) {
-    const cx = clamp(px, r[0], r[0] + r[2]), cy = clamp(py, r[1], r[1] + r[3]);
-    return Math.hypot(px - cx, py - cy);
-  }
-
-  function checkObjects(b, S) {
-    // ★とゴールを先に判定する（危険地帯と近くても、ゴールに入ったらゴールを優先）
-    for (const s of S.stars) {
-      if (!G.collected.has(s.id) && Math.hypot(b.x - s.x, b.y - s.y) < s.r + R) collect(s.id, true);
-    }
-    if (G.goal.side === b.side) {
-      const d = Math.hypot(b.x - G.goal.x, b.y - G.goal.y);
-      if (d < G.goal.r * 0.8) {
-        if (G.collected.size >= G.total) { clearStage(); return true; }
-        if (now() - G.lockToast > 2500) { G.lockToast = now(); toast(`🔒 ゴールはまだ閉じている（★ ${G.collected.size}/${G.total}）`); }
-      }
-    }
-    for (const h of G.hearts) {
-      if (!h.got && h.side === b.side && Math.hypot(b.x - h.x, b.y - h.y) < 15 + R) takeHeart(h.id, true);
-    }
-    for (const r of S.danger) {
-      if (rectDist(b.x, b.y, r) < R * 0.55) { fail('trap', r); return true; }
-    }
-    for (const t of S.tunnels) {
-      if (!t.enter) continue; // 出口からは入れない
-      const d = Math.hypot(b.x - t.x, b.y - t.y);
-      if (b.ign === t.id) { if (d > t.r + R + 2) b.ign = null; continue; }
-      if (d < t.r * 0.6) { enterTunnel(t); return true; }
-    }
-    return false;
-  }
-
-  function collect(id, mine) {
-    if (G.collected.has(id)) return;
-    G.collected.add(id);
-    Snd.play('star'); vib(30);
-    const all = G.collected.size >= G.total;
-    toast(`★ ${G.collected.size}/${G.total}${all ? '　ゴールが開いた！' : ''}`);
-    if (mine) send({ t: 'star', id });
   }
 
   // ハート：ライフ +1（最大 RUN_MAX_LIVES）
-  function takeHeart(id, mine, lives) {
-    const h = G.hearts.find((x) => x.id === id);
-    if (!h || h.got || !G.run) return;
-    h.got = true;
+  function gotHeart(id, local, lives) {
+    if (!G.run) return;
+    const h = G.world.hearts.find((x) => x.id === id);
+    if (h) h.got = true;
     if (!G.run.taken.includes(id)) G.run.taken.push(id);
-    G.run.lives = mine ? Math.min(RUN_MAX_LIVES, G.run.lives + 1) : (typeof lives === 'number' ? lives : G.run.lives);
+    G.run.lives = local ? Math.min(RUN_MAX_LIVES, G.run.lives + 1) : (typeof lives === 'number' ? lives : G.run.lives);
     Snd.play('star'); vib(40);
     toast(`♥ ライフ +1（${G.run.lives}）`);
-    if (mine) send({ t: 'heart', id, lives: G.run.lives });
+    if (local) send({ t: 'heart', id, lives: G.run.lives });
   }
 
-  function fail(reason = 'trap', rect = null) {
-    const b = G.ball;
+  // 玉がアウトになった（危険地帯・敵）
+  function failed(o, reason, rect) {
     G.misses++;
     if (G.run) G.run.lives = Math.max(0, G.run.lives - 1);
-    G.flash = { side: b.side, x: b.x, y: b.y, t: now(), type: 'fail' };
-    b.hidden = true;
-    Snd.play('fail'); vib(250);
+    G.flash = { side: o.side, x: o.x, y: o.y, t: now(), type: 'fail' };
     // 見えない危険地帯の場所は教えない（口で伝え合うのがこのゲームの楽しさ）
-    const visible = rect && G.sides[b.side].seen.some((r) => r.join() === rect.join());
-    const life = G.run ? `（ライフ −1 → 残り ${G.run.lives}）` : '';
-    toast((visible ? '💥 危険地帯に触れた！' : '💥 見えない危険地帯に触れた！') + life, 2800);
-    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason, lives: G.run ? G.run.lives : null });
-    G.pendingCp = null;
+    const visible = rect && G.world.faces[o.side].seen.some((r) => r.join() === rect.join());
+    failToast(reason, visible, o.side);
+    send({ t: 'fail', side: o.side, x: o.x, y: o.y, misses: G.misses, reason, visible: !!visible, lives: G.run ? G.run.lives : null });
+    Snd.play('fail'); vib(250);
     G.busy = 0.9;
     if (G.run && G.run.lives <= 0) { G.after = () => runOver(true); return; }
-    G.after = () => {
-      const cp = G.checkpoint;
-      placeBall(cp.side, cp.x, cp.y, 0, 0, cp.ign, reason === 'desync' ? 'realign' : 'respawn');
-    };
+    G.after = () => { PH.respawn(G.world, o); sendState(true); };
+  }
+  function failToast(reason, visible, side) {
+    const mine = App.mode === 'solo' || App.mySides.includes(side);
+    const life = G.run ? `（ライフ −1 → 残り ${G.run.lives}）` : '';
+    let msg;
+    if (reason === 'enemy') msg = mine ? '👾 敵にぶつかった！' : '👾 相棒側で敵にぶつかった！';
+    else if (!mine) msg = '💥 相棒側で危険地帯に触れた！';
+    else msg = visible ? '💥 危険地帯に触れた！' : '💥 見えない危険地帯に触れた！';
+    toast(msg + life + (G.world.objs.some((x) => x.kind === 'enemy') ? '　敵も元の場所へ' : ''), 2800);
   }
 
   // 自分の傾きと、相棒の傾き（自分の面に直したもの）の角度の差。比べられないときは null。
@@ -479,17 +419,15 @@
     return best;
   }
 
-  // 傾きのずれ・センサーの停止を見張る（玉を動かしている側だけが判定して、相棒にも知らせる）
+  // 傾きのずれ・センサーの停止を見張る（計算している端末だけが判定して、相棒にも知らせる）
   function checkSync(dt) {
-    if (App.mode === 'solo' || G.syncMute || G.ball.hold > 0) return false;
-    // どちらかのセンサーだけが止まっている
+    if (App.mode === 'solo' || G.syncMute || G.world.hold > 0) return false;
     const mineStopped = Sensor.got && Sensor.age() > 2000 && partnerFresh();
     const theirsStopped = partnerSensor() && App.partner.age > 2000 && Sensor.fresh();
     if (mineStopped || theirsStopped) {
       G.stallT = (G.stallT || 0) + dt;
       if (G.stallT > 0.5) { G.stallT = 0; pauseGame('sensor', mineStopped ? mySide() : other(mySide())); return true; }
     } else G.stallT = 0;
-    // 傾きがずれ続けている
     const sd = syncDiff();
     if (sd !== null && sd > SYNC_LIMIT) {
       G.desyncT = (G.desyncT || 0) + dt;
@@ -501,7 +439,7 @@
   function pauseGame(reason, who, remote) {
     if (!G || G.paused) return;
     G.paused = { reason, who, since: now() };
-    if (G.ball) { G.ball.vx = 0; G.ball.vy = 0; }
+    for (const o of G.world.objs) { o.vx = 0; o.vy = 0; }
     Snd.play('fail'); vib([80, 60, 80]);
     if (!remote) send({ t: 'pause', reason, who });
     const title = reason === 'sensor' ? '傾きセンサーが反応していません' : '2台の傾きがずれています';
@@ -520,7 +458,7 @@
     G.paused = null;
     if (G.phase === 'play') G.t0 += pausedFor;
     G.desyncT = 0; G.stallT = 0;
-    if (G.ball) G.ball.hold = Math.max(G.ball.hold || 0, 0.8);
+    G.world.hold = Math.max(G.world.hold || 0, 0.8);
     $('syncwait').classList.add('hidden');
     if (!remote) send({ t: 'resume', mute: !!mute });
     toast('再開！');
@@ -542,43 +480,9 @@
     $('sw-ok').disabled = !ok;
   }
 
-  function enterTunnel(t) {
-    G.warpCount = (G.warpCount || 0) + 1;
-    const b = G.ball, to = other(b.side);
-    const exit = G.sides[to].tunnels.find((x) => x.id === t.id);
-    G.flash = { side: b.side, x: t.x, y: t.y, t: now(), type: 'tunnel' };
-    b.hidden = true;
-    Snd.play('tunnel'); vib(60);
-    const vx = -b.vx * 0.5, vy = b.vy * 0.5; // 真裏に出るので左右の向きが反転
-    G.busy = 0.35;
-    G.after = () => placeBall(to, exit.x, exit.y, vx, vy, t.id, 'tunnel');
-  }
-
-  function makeBall(side, x, y, vx, vy, ign, reason) {
-    return {
-      side, x, y, vx, vy, ign, hidden: false,
-      hold: reason === 'respawn' ? RESPAWN_HOLD : 0,
-      alignWait: reason === 'realign', alignT: 0,
-    };
-  }
-
-  function placeBall(side, x, y, vx, vy, ign, reason) {
-    G.ball = makeBall(side, x, y, vx, vy, ign, reason);
-    G.pendingCp = reason === 'tunnel' ? { side, x, y, ign, t: CP_CONFIRM } : null;
-    if (App.mySides.includes(side)) {
-      if (reason === 'tunnel') {
-        Snd.play('arrive');
-        toast(App.mode === 'solo' ? `トンネルを抜けて${SIDE[side].name}へ！` : '玉がこっちに来た！');
-      }
-    } else {
-      send({ t: 'place', side, x, y, vx, vy, ign, reason });
-      if (reason === 'tunnel') toast('玉は相棒の画面へ！ 赤い危険地帯を教えてあげて');
-      else toast('玉は相棒の画面で再開');
-    }
-  }
-
   function clearStage() {
     const res = { time: G.elapsed, misses: G.misses };
+    sendState(true);
     send({ t: 'clear', ...res });
     showResult(res);
   }
@@ -611,6 +515,7 @@
       $('rs-retry').classList.remove('hidden');
       $('rs-lobby').textContent = 'ステージ選択へ';
     }
+    $('rs-next').disabled = false;
     $('rs-next').classList.remove('hidden');
     $('rs-host').classList.toggle('hidden', !leader);
     $('rs-wait').classList.toggle('hidden', leader);
@@ -635,6 +540,7 @@
     $('rs-rank').innerHTML = `<span class="score">${floors}階クリア</span>`;
     $('rs-detail').innerHTML = `${G.run.floor}階でライフが尽きた（合計 ${fmtTime(time)}）<br>${isNew && floors > 0 ? '🎉 自己ベスト更新！' : bestText()}`;
     $('rs-next').textContent = 'もう一度挑戦';
+    $('rs-next').disabled = false;
     $('rs-retry').classList.add('hidden');
     $('rs-lobby').textContent = 'ロビーへ';
     const leader = App.mode !== 'guest';
@@ -652,31 +558,39 @@
   }
 
   // ---------- ホストの操作 ----------
-  function leaderStart(idx, pick, run) {
-    pick = pick || randomPick(idx);
-    send({ t: 'start', stage: idx, pick, run: run || null });
-    startStage(idx, pick, run);
+  function leaderStart(st) {
+    send({ t: 'start', st });
+    startStage(st);
   }
-  // スコアアタックを1階から
-  function leaderStartRun() {
-    const f = floorSpec(1);
-    leaderStart(f.idx, f.pick, { floor: 1, lives: RUN_LIVES, time: 0, taken: [] });
+  function leaderTutorial(idx) {
+    leaderStart({ idx, p: Math.floor(Math.random() * patternsOf(LEVELS[idx]).length) });
   }
+  // スコアアタックの floor 階を始める（迷路ができるまで少し待つことがある）
+  let genBusy = false;
+  async function leaderFloor(run) {
+    if (genBusy) return;
+    genBusy = true;
+    $('rs-next').disabled = true;
+    const t = setTimeout(() => toast('🛠 迷路を作っています…', 3000), 250);
+    const gen = await GenSvc.get(run.floor);
+    clearTimeout(t);
+    genBusy = false;
+    if (!gen) { toast('迷路を作れませんでした。もう一度押してください'); $('rs-next').disabled = false; return; }
+    leaderStart({ idx: -1, p: 0, gen, run });
+  }
+  function leaderStartRun() { leaderFloor({ floor: 1, lives: RUN_LIVES, time: 0, taken: [] }); }
   // 次へ（チュートリアルなら次のステージ、スコアアタックなら次の階）
   function leaderNext() {
     if (!G) return;
     if (G.run && G.phase === 'over') return leaderStartRun();
-    if (G.run) {
-      const f = floorSpec(G.run.floor + 1);
-      return leaderStart(f.idx, f.pick, { floor: G.run.floor + 1, lives: G.run.lives, time: G.run.time, taken: [] });
-    }
+    if (G.run) return leaderFloor({ floor: G.run.floor + 1, lives: G.run.lives, time: G.run.time, taken: [] });
     if (G.idx >= LEVELS.length - 1) return leaderStartRun();
-    leaderStart(G.idx + 1);
+    leaderTutorial(G.idx + 1);
   }
   // 最初からやり直す（同じ形のまま。スコアアタックならライフ・取ったハートはそのまま）
   function leaderRestart() {
     if (!G || G.phase === 'over') return;
-    leaderStart(G.idx, G.pick, G.run ? { ...G.run, taken: G.run.taken.slice() } : null);
+    leaderStart({ ...G.st, run: G.run ? { ...G.run, taken: G.run.taken.slice() } : null });
   }
   function requestRestart() {
     if (!G) return;
@@ -698,44 +612,36 @@
         App.partner = { k: m.k | 0, lean: !!m.lean, s: !!m.s, g: Array.isArray(m.g) ? m.g : [0, 1], t: now(), age: typeof m.age === 'number' ? m.age : 0 };
         if (App.mode === 'guest' && typeof m.th === 'number') App.theta = m.th;
         break;
-      case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick, m.run); break;
+      case 'start': if (App.mode === 'guest' && m.st) startStage(m.st); break;
       case 'sync': if (App.mode === 'guest') resumeStage(m); break;
+      case 'st': if (App.mode === 'guest') applyState(m); break;
+      case 'fx': if (G && App.mode === 'guest') fx(m, true); break;
       case 'line':
         if (!G || (m.face !== 'A' && m.face !== 'B')) break;
         if (m.seg === null) { // 相棒が消しゴムで消した
-          G.lines[m.face] = null;
+          G.world.lines[m.face] = null;
           if (App.mySides.includes(m.face)) toast('相棒が床を消した');
           break;
         }
         if (!Array.isArray(m.seg) || !m.seg.slice(0, 4).every((n) => Number.isFinite(Number(n)))) break;
-        G.lines[m.face] = m.seg.slice(0, 4).map(Number);
+        G.world.lines[m.face] = m.seg.slice(0, 4).map(Number);
         if (App.mySides.includes(m.face)) { Snd.play('tap'); vib(30); toast('相棒があなたの画面に床を描いた！'); }
         break;
       case 'restartReq': if (App.mode === 'host' && G) leaderRestart(); break;
       case 'pause': if (G) pauseGame(m.reason, m.who, true); break;
       case 'resume': if (G) resumeGame(true, !!m.mute); break;
       case 'lobby': if (App.mode === 'guest') goLobby(); break;
-      case 'place':
-        if (!G) break;
-        G.busy = 0; G.after = null;
-        G.ball = makeBall(m.side, m.x, m.y, m.vx, m.vy, m.ign, m.reason);
-        G.pendingCp = m.reason === 'tunnel' ? { side: m.side, x: m.x, y: m.y, ign: m.ign, t: CP_CONFIRM } : null;
-        Snd.play('arrive'); vib(60);
-        toast(m.reason === 'tunnel' ? '玉がこっちに来た！' : '玉はこっちで再開');
-        break;
-      case 'cp': if (G) G.checkpoint = m.cp; break;
-      case 'star': if (G) collect(m.id, false); break;
       case 'fail':
         if (!G) break;
         G.misses = m.misses;
         G.flash = { side: m.side, x: m.x, y: m.y, t: now(), type: 'fail' };
         if (G.run && typeof m.lives === 'number') G.run.lives = m.lives;
         Snd.play('fail'); vib(250);
-        toast('💥 相棒側で危険地帯に触れた！' + (G.run ? `（ライフ残り ${G.run.lives}）` : ''), 2600);
+        failToast(m.reason, m.visible, m.side);
         break;
       case 'clear': if (G) showResult(m); break;
       case 'over': if (G) runOver(false); break;
-      case 'heart': if (G) takeHeart(m.id, false, m.lives); break;
+      case 'heart': if (G) gotHeart(m.id, false, m.lives); break;
     }
   }
 
@@ -872,9 +778,11 @@
         v.rot = App.stageRot || 0; v.k = 1;
       }
       drawView(v);
-      const here = G.ball.side === v.side;
+      const nb = ballsOn(v.side), multi = G.world.objs.filter((o) => o.kind === 'ball').length > 1;
+      const ne = G.world.objs.filter((o) => o.kind === 'enemy' && o.side === v.side && !o.hidden).length;
       const lbl = `${SIDE[v.side].name}${App.mode === 'solo' ? '' : '（あなた）'}` +
-        (here ? '<span class="here">● 玉はここ</span>' : '<span class="away">◌ 玉は向こう側</span>');
+        (nb ? `<span class="here">● 玉${multi ? ` ×${nb}` : 'はここ'}</span>` : '<span class="away">◌ 玉は向こう側</span>') +
+        (ne ? `<span class="enemy-tag">👾×${ne}</span>` : '');
       if (lbl !== v.lastLabel) { v.label.innerHTML = lbl; v.lastLabel = lbl; }
     }
     updateSyncWait();
@@ -961,16 +869,14 @@
     }
     ctx.restore();
 
-    // 玉
-    const b = G.ball;
-    if (b.side === side && !b.hidden && (owns() || G.phase === 'count')) {
-      drawBall(ctx, b.x, b.y);
-      if (b.alignWait) { // そろうまで待つ
-        ctx.fillStyle = 'rgba(255,220,120,0.95)'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('2台をそろえて！', clamp(b.x, 70, W - 70), b.y < 80 ? b.y + 36 : b.y - 24);
-      } else if (b.hold > 0) { // 復活待ちのリング
+    // 玉と敵（この面にいるものだけ）
+    for (const o of G.world.objs) {
+      if (o.side !== side || o.hidden) continue;
+      if (o.kind === 'enemy') { drawEnemy(ctx, o.x, o.y, t); continue; }
+      drawBall(ctx, o.x, o.y);
+      if (G.world.hold > 0) { // 復活待ちのリング
         ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.arc(b.x, b.y, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (b.hold / RESPAWN_HOLD)); ctx.stroke();
+        ctx.beginPath(); ctx.arc(o.x, o.y, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, G.world.hold / PH.RESPAWN_HOLD)); ctx.stroke();
       }
     }
 
@@ -1042,6 +948,39 @@
     ctx.fillStyle = open ? '#d9ffe8' : 'rgba(220,220,240,0.8)';
     ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(open ? 'GOAL' : '🔒', gl.x, gl.y);
+  }
+
+  // 敵：とげとげの紫の玉に、怒った目（ひと目で敵とわかるように）
+  function drawEnemy(ctx, x, y, t) {
+    const r = PH.ER;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(t * 1.5);
+    ctx.shadowColor = '#ff2d6f'; ctx.shadowBlur = 12;
+    ctx.fillStyle = '#e0204f';
+    ctx.beginPath();
+    const spikes = 9;
+    for (let i = 0; i < spikes * 2; i++) {
+      const a = (i * Math.PI) / spikes, rr = i % 2 ? r * 0.82 : r * 1.35;
+      ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+    const g = ctx.createRadialGradient(-3, -4, 1, 0, 0, r);
+    g.addColorStop(0, '#b06cff'); g.addColorStop(1, '#4a1680');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // 目（回転させない）
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.ellipse(-4.5, -1, 3.4, 3.8, 0, 0, Math.PI * 2); ctx.ellipse(4.5, -1, 3.4, 3.8, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1a0010';
+    ctx.beginPath(); ctx.arc(-4, 0, 1.7, 0, Math.PI * 2); ctx.arc(5, 0, 1.7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#1a0010'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-8, -6); ctx.lineTo(-2, -3.5); ctx.moveTo(8, -6); ctx.lineTo(2, -3.5); ctx.stroke(); // 怒ったまゆ
+    ctx.restore();
   }
 
   function drawHeart(ctx, x, y, t) {
@@ -1230,19 +1169,28 @@
   // 再接続したときの再開データ（★・ミス・タイム・チェックポイントは引き継ぐ）
   function snapshot() {
     return {
-      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses, lines: G.lines, run: G.run, over: G.phase === 'over',
-      elapsed: G.elapsed, checkpoint: G.checkpoint, cleared: G.phase === 'clear',
+      st: { ...G.st, run: G.run ? { ...G.run, taken: G.run.taken.slice() } : null },
+      misses: G.misses, lines: { ...G.world.lines }, over: G.phase === 'over', cleared: G.phase === 'clear', elapsed: G.elapsed,
+      objs: G.world.objs.map((o) => ({ id: o.id, side: o.side, x: o.x, y: o.y, goaled: !!o.goaled, cp: o.cp || null })),
     };
   }
+  // 再開：ゴールした玉はそのまま、ほかの玉はそれぞれのチェックポイントから。敵はその場から
   function resumeStage(s) {
-    startStage(s.stage, s.pick, s.run);
-    G.collected = new Set(s.collected || []);
+    if (!s.st) return;
+    startStage(s.st);
     G.misses = s.misses || 0;
     G.resumeElapsed = s.elapsed || 0;
-    if (s.lines) G.lines = { A: s.lines.A || null, B: s.lines.B || null };
-    const cp = s.checkpoint || G.checkpoint;
-    G.checkpoint = cp;
-    G.ball = { side: cp.side, x: cp.x, y: cp.y, vx: 0, vy: 0, ign: cp.ign, hidden: false, hold: 0 };
+    if (s.lines) { G.world.lines.A = s.lines.A || null; G.world.lines.B = s.lines.B || null; }
+    for (const so of s.objs || []) {
+      const o = G.world.objs.find((x) => x.id === so.id);
+      if (!o) continue;
+      if (o.kind === 'ball') {
+        o.goaled = !!so.goaled;
+        const cp = so.cp || o.cp;
+        o.cp = cp; o.side = cp.side; o.x = cp.x; o.y = cp.y; o.ign = cp.ign;
+      } else { o.side = so.side; o.x = so.x; o.y = so.y; }
+      o.hidden = !!o.goaled;
+    }
     if (s.over) runOver(false);
     else if (s.cleared) showResult({ time: s.elapsed, misses: s.misses }, true);
     else toast('つながった！ チェックポイントから再開します');
@@ -1301,7 +1249,7 @@
     const b = e.target.closest('button'); if (!b) return;
     App.stageSel = Number(b.dataset.i); Snd.play('tap'); renderLobby();
   });
-  $('lb-start').addEventListener('click', () => { Snd.init(); leaderStart(App.stageSel); });
+  $('lb-start').addEventListener('click', () => { Snd.init(); leaderTutorial(App.stageSel); });
   $('lb-run').addEventListener('click', () => { Snd.init(); leaderStartRun(); });
   $('lb-share').addEventListener('click', async () => {
     const url = pageUrl();
@@ -1319,7 +1267,7 @@
 
   // リザルト・メニュー
   $('rs-next').addEventListener('click', leaderNext);
-  $('rs-retry').addEventListener('click', () => leaderStart(G.idx)); // チュートリアルの「もう一度」は形も変える
+  $('rs-retry').addEventListener('click', () => leaderTutorial(G.idx)); // チュートリアルの「もう一度」は形も変える
   $('hud-restart').addEventListener('click', requestRestart);
   // 消しゴム：自分が描いた床を消す
   $('hud-erase').addEventListener('click', () => {
@@ -1350,12 +1298,13 @@
       get G() { return G; },
       // 物理を手動で進める（自動テスト用）
       step(dt = 1 / 60, n = 1) { for (let i = 0; i < n; i++) update(dt); },
-      start(idx, pick, run) { startStage(idx, pick, run); },
-      patterns(idx, seed) { return patternsOf(levelAt(idx, { seed })); },
-      level(idx, seed) { return levelAt(idx, { seed }); },
-      setLine(face, seg) { G.lines[face] = seg; },
+      // idx: チュートリアルの番号。pick.p: パターン番号
+      start(idx, pick, run) { startStage({ idx, p: pick ? pick.p : 0, run: run || null }); },
+      startGen(gen, run) { startStage({ idx: -1, p: 0, gen, run: run || null }); },
+      makeGen(level, seed) { return GenSvc.makeHere(level, seed); },
+      patterns(idx) { return patternsOf(LEVELS[idx]); },
+      setLine(face, seg) { G.world.lines[face] = seg; },
       startRun() { leaderStartRun(); },
-      floorSpec,
       fit,
     };
   }

@@ -209,3 +209,4 @@ html.fs { --top-min: 30px; --bottom-min: 12px; } /* 全画面表示中は、シ�
 .life-big { font-size: 34px; color: #ff4f7b; letter-spacing: 4px; }
 .life-big .off { opacity: .2; }
 .score { font-size: 30px; color: #ffd84a; }
+.vlabel .enemy-tag { color: #ff6b8a; margin-left: 6px; }
