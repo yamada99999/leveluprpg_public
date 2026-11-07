@@ -8,7 +8,7 @@
 // 重力は grav(面) で外から渡す（束の傾き）。
 (function (root) {
   const W = 360, H = 640, WALL = 12, R = 13, ER = 14;
-  const G_ACC = 1150, DAMP = 0.5, MAXV = 950, REST = 0.3, LINE_R = 3;
+  const G_ACC = 1150, DAMP = 0.5, MAXV = 950, REST = 0.3, LINE_R = 3, SLOPE_R = 5;
   const CP_CONFIRM = 1.2, WARP_T = 0.35, RESPAWN_HOLD = 1.2;
   const other = (s) => (s === 'A' ? 'B' : 'A');
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -19,10 +19,11 @@
   function buildFace(P, side) {
     const F = P[side] || {};
     const walls = [[0, 0, W, WALL], [0, H - WALL, W, WALL], [0, 0, WALL, H], [W - WALL, 0, WALL, H], ...(F.walls || [])];
+    const slopes = (F.slopes || []).map((s) => s.slice()); // 斜めの床（はじめからある）[x1,y1,x2,y2]
     const seen = (F.danger || []).map((r) => r.slice()); // この面の人にだけ見える危険地帯
     // ワープは一方通行：from の面が入口、反対の面は出口
     const tunnels = (P.tunnels || []).map((t, i) => ({ id: i + 1, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y, enter: (t.from || 'A') === side }));
-    return { walls, seen, danger: [], stars: [], tunnels };
+    return { walls, slopes, seen, danger: [], stars: [], tunnels };
   }
   function buildFaces(P) {
     const faces = { A: buildFace(P, 'A'), B: buildFace(P, 'B') };
@@ -76,12 +77,12 @@
     o.x += nx * pen; o.y += ny * pen;
     bounce(o, nx, ny, ev);
   }
-  function collideSeg(o, s, ev) {
+  function collideSeg(o, s, ev, thick = LINE_R) {
     const [x1, y1, x2, y2] = s;
     const vx = x2 - x1, vy = y2 - y1, L2 = vx * vx + vy * vy || 1;
     const t = clamp(((o.x - x1) * vx + (o.y - y1) * vy) / L2, 0, 1);
     const dx = o.x - (x1 + vx * t), dy = o.y - (y1 + vy * t);
-    const d = Math.hypot(dx, dy), need = o.r + LINE_R;
+    const d = Math.hypot(dx, dy), need = o.r + thick;
     if (d >= need) return;
     let nx, ny;
     if (d < 1e-6) { nx = -vy; ny = vx; const n = Math.hypot(nx, ny) || 1; nx /= n; ny /= n; } else { nx = dx / d; ny = dy / d; }
@@ -144,6 +145,7 @@
     for (let i = 0; i < n; i++) {
       o.x += o.vx * h; o.y += o.vy * h;
       for (const w of F.walls) collideRect(o, w, ev);
+      for (const sl of F.slopes) collideSeg(o, sl, ev, SLOPE_R);
       const ln = world.lines[o.side];
       if (ln) collideSeg(o, ln, ev);
       o.x = clamp(o.x, WALL + o.r, W - WALL - o.r);
@@ -315,7 +317,7 @@
   }
 
   const api = {
-    W, H, WALL, R, ER, LINE_R, RESPAWN_HOLD,
+    W, H, WALL, R, ER, LINE_R, SLOPE_R, RESPAWN_HOLD,
     buildFaces, makeWorld, cloneWorld, step, respawn, search, replay, robust, gravAt, mirrorRect, rectDist, other,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

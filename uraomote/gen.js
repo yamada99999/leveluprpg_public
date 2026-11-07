@@ -358,6 +358,7 @@
     const face = (f) => ({
       walls: M.divs[f].map((y) => [WALL, y, W - WALL * 2, T]),
       danger: M.dangers.filter((d) => d.seen === f).map((d) => d.rect),
+      slopes: [],
     });
     return {
       start: { side: M.start.face, x: M.start.x, y: M.start.y },
@@ -433,6 +434,68 @@
     return { pattern: P, draws };
   }
 
+  // ---------- 斜めの床（はじめからある） ----------
+  // 点から線分までの距離
+  function segDist(px, py, s) {
+    const vx = s[2] - s[0], vy = s[3] - s[1], L2 = vx * vx + vy * vy || 1;
+    const t = clamp(((px - s[0]) * vx + (py - s[1]) * vy) / L2, 0, 1);
+    return Math.hypot(px - (s[0] + vx * t), py - (s[1] + vy * t));
+  }
+  // 線分と四角の距離（線分の上を細かくたどって調べる）
+  function segRectDist(s, r) {
+    let m = Infinity;
+    for (let i = 0; i <= 12; i++) { const t = i / 12; m = Math.min(m, rectDist(s[0] + (s[2] - s[0]) * t, s[1] + (s[3] - s[1]) * t, r)); }
+    return m;
+  }
+  // 部屋の中に斜めの床を1〜2本置く。
+  //  ・横の壁から生えた坂（45°か30°。中央に向かって下る／上る）か、宙に浮いた45°の板
+  //  ・坂と部屋の天井・床のあいだは、玉が通れるだけ空ける
+  //  ・ワープ・ゴール・スタート・ほかの床や危険地帯には近づけない
+  // 置いたあと、実際の物理（45°刻みも使う）で解けるかを確かめるので、坂が道をふさいでも解けない迷路は出ない
+  function addSlopes(M, pattern, rand) {
+    const ri = (a, b) => a + Math.floor(rand() * (b - a + 1));
+    const P = JSON.parse(JSON.stringify(pattern));
+    for (const f of ['A', 'B']) P[f].slopes = P[f].slopes || [];
+    const want = rand() < 0.35 ? 2 : 1;
+    let placed = 0;
+    for (let tries = 0; tries < 40 && placed < want; tries++) {
+      const face = rand() < 0.5 ? 'A' : 'B';
+      const rs = rooms(M.divs[face]);
+      const c = rs[ri(0, rs.length - 1)];
+      const gap = 2 * R + 12; // 玉が通れるすき間
+      let seg;
+      if (rand() < 0.6) { // 壁から生えた坂
+        const L = ri(70, 150), k = rand() < 0.7 ? 1 : 0.58, dy = Math.round(L * k) * (rand() < 0.5 ? 1 : -1);
+        const lo = c.top + gap + Math.max(0, -dy), hi = c.bottom - gap - Math.max(0, dy);
+        if (hi < lo) continue;
+        const y1 = ri(lo, hi);
+        seg = rand() < 0.5 ? [WALL, y1, WALL + L, y1 + dy] : [W - WALL, y1, W - WALL - L, y1 + dy];
+      } else { // 宙に浮いた板
+        const hl = ri(40, 70), cx = ri(110, 250), sgn = rand() < 0.5 ? 1 : -1;
+        const lo = c.top + gap + hl, hi = c.bottom - gap - hl;
+        if (hi < lo) continue;
+        const cy = ri(lo, hi);
+        seg = [cx - hl, cy - sgn * hl, cx + hl, cy + sgn * hl];
+      }
+      const pts = [];
+      for (const w of M.warps) { if (w.face === face) pts.push(warpIn(w)); if (other(w.face) === face) pts.push(warpOut(w)); }
+      if (pts.some((p) => segDist(p.x, p.y, seg) < 46)) continue;
+      if (P.goal.side === face && segDist(P.goal.x, P.goal.y, seg) < 60) continue;
+      for (const b of P.balls || [P.start]) if (b.side === face && segDist(b.x, b.y, seg) < 46) seg = null;
+      if (!seg) continue;
+      if (P[face].walls.some((w) => segRectDist(seg, w) < gap - 6)) continue;
+      const dz = [...P[face].danger, ...P[other(face)].danger.map(mirrorRect)];
+      if (dz.some((r) => segRectDist(seg, r) < 8)) continue;
+      if (P[face].slopes.some((q) => [0, 0.5, 1].some((t) => segDist(q[0] + (q[2] - q[0]) * t, q[1] + (q[3] - q[1]) * t, seg) < 44))) continue;
+      P[face].slopes.push(seg);
+      placed++;
+    }
+    return placed ? P : null;
+  }
+  const slopeNear = (P, side, x, y, d) => (P[side].slopes || []).some((q) => segDist(x, y, q) < d);
+  // 斜めの床を入れる割合（机上のルール）：レベル7から少し、8からは半分くらい
+  const slopeP = (lv) => (lv >= 8 ? 0.5 : lv >= 7 ? 0.3 : 0);
+
   // ---------- 玉を増やす・敵を置く ----------
   // 何を足すかは難しさレベルで決める（机上のルール）
   function extrasFor(lv, rand) {
@@ -457,6 +520,7 @@
     const allDanger = (face) => [...pattern[face].danger, ...pattern[other(face)].danger.map(mirrorRect)];
     const okSpot = (s) => {
       if (pattern[s.side].walls.some((w) => rectDist(s.x, s.y, w) < R)) return false; // 足場の中など
+      if (slopeNear(pattern, s.side, s.x, s.y, R + 14)) return false; // 斜めの床にかかる
       if (warpPts(s.side).some((p) => Math.hypot(p.x - s.x, p.y - s.y) < 60)) return false;
       if (allDanger(s.side).some((r) => rectDist(s.x, s.y, r) < 50)) return false;
       if (pattern.goal.side === s.side && Math.hypot(pattern.goal.x - s.x, pattern.goal.y - s.y) < 70) return false;
@@ -503,8 +567,9 @@
     // 玉・敵の数・床のギミックは最初に決める。どうしても置けないときだけ、少しずつ減らす
     const want = extrasFor(Math.min(n, 20), rand);
     let wantBridge = rand() < bridgeP(Math.min(n, 20));
+    let wantSlope = rand() < slopeP(Math.min(n, 20));
     const mustDraw = rand() < 0.45;
-    let exFails = 0, brFails = 0;
+    let exFails = 0, brFails = 0, slFails = 0;
     // 物理の探索は重いので、使ってよい量を決めておく。使い切ったら玉・敵を1つ減らす
     const budget = { used: 0, max: 7000 };
     const t0 = Date.now();
@@ -518,7 +583,7 @@
         downgraded++;
       }
       if (spent > 3000) { want.enemies = 0; want.balls = 1; }
-      if (spent > 4000) wantBridge = false;
+      if (spent > 4000) { wantBridge = false; wantSlope = false; }
       const r = tryBuild(level, rand);
       if (!r) continue;
       let pattern = toPattern(r.M);
@@ -528,9 +593,16 @@
         if (!br) { if (++brFails > 60) wantBridge = false; continue; }
         pattern = br.pattern; draws = br.draws;
       }
+      let slopes = false;
+      if (wantSlope) {
+        const sp = addSlopes(r.M, pattern, rand);
+        if (!sp) { if (++slFails > 40) wantSlope = false; continue; }
+        pattern = sp; slopes = true;
+      }
       if (want.balls > 1 || want.enemies > 0) {
         const ex = placeExtras(r.M, pattern, want, rand, budget, draws);
         if (!ex) { // この形では無理だった：別の形で作り直す
+          if (slopes && ++slFails > 40) wantSlope = false;
           if (++exFails % 12 === 0 || budget.used > budget.max) {
             if (want.enemies > 0) want.enemies--; else if (want.balls > 1) want.balls--;
             budget.used = 0;
@@ -538,9 +610,9 @@
           continue;
         }
         pattern = ex.pattern; actions = ex.actions; step = ex.step;
-      } else if (wantBridge) {
+      } else if (wantBridge || slopes) { // 斜めの床があるときは、壁ぞいの計算では足りないので必ず物理で確かめる
         const res = verify(pattern, draws, budget);
-        if (!res.ok) { if (++brFails > 60) wantBridge = false; continue; }
+        if (!res.ok) { if (wantBridge && ++brFails > 60) wantBridge = false; if (slopes && ++slFails > 40) wantSlope = false; continue; }
         actions = res.actions; step = res.step;
       }
       if (wantBridge) {
@@ -551,17 +623,19 @@
       // ハートは半分くらいのステージに1つ（足場や穴の中には置かない）
       let heart = rand() < 0.5 ? placeHeart(r.M, r.sol, rand) : null;
       if (heart && (pattern[heart.side].walls.some((w) => rectDist(heart.x, heart.y, w) < 18) ||
-        [...pattern[heart.side].danger, ...pattern[other(heart.side)].danger.map(mirrorRect)].some((d) => rectDist(heart.x, heart.y, d) < 40))) heart = null;
+        [...pattern[heart.side].danger, ...pattern[other(heart.side)].danger.map(mirrorRect)].some((d) => rectDist(heart.x, heart.y, d) < 40) ||
+        slopeNear(pattern, heart.side, heart.x, heart.y, 30))) heart = null;
       pattern.hearts = heart ? [{ id: 'h1', ...heart }] : [];
       const nb = (pattern.balls || [1]).length, ne = (pattern.enemies || []).length;
       return {
         pattern,
         name: '自動生成',
         // 床が必要かどうかは書かない（「描かなきゃ」という先入観もゲームのうち）
-        hint: `その場で作った迷路。${nb > 1 ? `玉${nb}つ（全部ゴールへ）・` : ''}${ne ? `敵${ne}体・` : ''}最短でワープ${r.sol.warps}回くらい。危険地帯${pattern.A.danger.length + pattern.B.danger.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}${draws.length ? '・穴あり' : ''}。`,
+        hint: `その場で作った迷路。${nb > 1 ? `玉${nb}つ（全部ゴールへ）・` : ''}${ne ? `敵${ne}体・` : ''}最短でワープ${r.sol.warps}回くらい。危険地帯${pattern.A.danger.length + pattern.B.danger.length}か所${r.M.warps.length > r.sol.warps ? '・ハズレのワープあり' : ''}${draws.length ? '・穴あり' : ''}${slopes ? '・斜めの床あり' : ''}。`,
         plan: actions ? null : r.sol.plan,
         actions, step, draws,
         bridge: draws.length > 0,
+        slopes,
         needDraw,
         heart,
         warps: r.sol.warps,

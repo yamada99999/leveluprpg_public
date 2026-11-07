@@ -169,7 +169,7 @@
 
   // パターンを左右反転したもの（両方の面をそろって反転するので、背中合わせの対応は崩れない）
   function mirrorPattern(P) {
-    const face = (F) => ({ walls: (F.walls || []).map(mirrorRect), danger: (F.danger || []).map(mirrorRect) });
+    const face = (F) => ({ walls: (F.walls || []).map(mirrorRect), slopes: (F.slopes || []).map((q) => [W - q[0], q[1], W - q[2], q[3]]), danger: (F.danger || []).map(mirrorRect) });
     return {
       start: P.start && mirrorPt(P.start), goal: mirrorPt(P.goal),
       balls: P.balls && P.balls.map(mirrorPt),
@@ -830,6 +830,9 @@
     ctx.save();
     ctx.globalAlpha = 0.22; ctx.strokeStyle = C.faint; ctx.lineWidth = 1.5; ctx.setLineDash([5, 5]);
     for (const w of P.walls.slice(4)) ctx.strokeRect(W - w[0] - w[2] + 0.5, w[1] + 0.5, w[2] - 1, w[3] - 1);
+    ctx.beginPath();
+    for (const q of P.slopes || []) { ctx.moveTo(W - q[0], q[1]); ctx.lineTo(W - q[2], q[3]); }
+    ctx.stroke();
     ctx.restore();
 
     // トンネル
@@ -846,10 +849,11 @@
       ctx.fillStyle = C.wall; ctx.fillRect(w[0], w[1], w[2], w[3]);
       ctx.fillStyle = C.wallTop; ctx.fillRect(w[0], w[1], w[2], Math.min(3, w[3]));
     }
+    for (const q of S.slopes || []) drawSlope(ctx, q, C);
 
     // 自分にだけ見える危険地帯（自分の面でも、真裏の相棒の面でも触れたらアウト）。
     // 壁より手前に描く：自分の面では壁の中でも、真裏の相棒の面では通り道かもしれないので
-    for (const r of S.seen) drawTrap(ctx, r[0], r[1], r[2], r[3], t);
+    drawTraps(ctx, S.seen, t);
 
     // 描いた床
     ctx.save();
@@ -903,21 +907,91 @@
     }
   }
 
-  function drawTrap(ctx, x, y, w, h, t) {
+  // 危険地帯：重なったり隣り合ったりしている四角は、1つの形にまとめて描く（輪郭は外まわりだけ・⚠はまとまりごとに1つ）
+  const trapCache = new Map();
+  function trapShape(rects) {
+    const key = rects.map((r) => r.join(',')).join('|');
+    const hit = trapCache.get(key);
+    if (hit) return hit;
+    // 4px 以内のずれは同じ線にそろえる（ぴったり並べたつもりの四角がすき間なくつながるように）
+    const snapList = (vals) => { const out = []; for (const v of [...vals].sort((a, b) => a - b)) if (!out.length || v - out[out.length - 1] > 4) out.push(v); return out; };
+    const near = (arr, v) => arr.reduce((b, c) => (Math.abs(c - v) < Math.abs(b - v) ? c : b));
+    const xs = snapList(rects.flatMap((r) => [r[0], r[0] + r[2]]));
+    const ys = snapList(rects.flatMap((r) => [r[1], r[1] + r[3]]));
+    const rs = rects.map((r) => [near(xs, r[0]), near(ys, r[1]), near(xs, r[0] + r[2]), near(ys, r[1] + r[3])]).filter((r) => r[2] > r[0] && r[3] > r[1]);
+    const nx = xs.length - 1, ny = ys.length - 1;
+    const cov = (i, j) => i >= 0 && j >= 0 && i < nx && j < ny && rs.some((r) => r[0] <= xs[i] && xs[i + 1] <= r[2] && r[1] <= ys[j] && ys[j + 1] <= r[3]);
+    const edges = [];
+    // 横の輪郭（上下で塗り／空きが変わるところ）をつなげて1本ずつ
+    for (let j = 0; j <= ny; j++) {
+      let run = null;
+      for (let i = 0; i <= nx; i++) {
+        const e = i < nx && cov(i, j - 1) !== cov(i, j);
+        if (e && run === null) run = xs[i];
+        if (!e && run !== null) { edges.push([run, ys[j], xs[i], ys[j]]); run = null; }
+      }
+    }
+    for (let i = 0; i <= nx; i++) {
+      let run = null;
+      for (let j = 0; j <= ny; j++) {
+        const e = j < ny && cov(i - 1, j) !== cov(i, j);
+        if (e && run === null) run = ys[j];
+        if (!e && run !== null) { edges.push([xs[i], run, xs[i], ys[j]]); run = null; }
+      }
+    }
+    // まとまり（重なる・接する四角どうし）ごとに ⚠ を1つ：いちばん大きい四角のまん中
+    const par = rs.map((_, i) => i);
+    const find = (i) => (par[i] === i ? i : (par[i] = find(par[i])));
+    for (let a = 0; a < rs.length; a++) for (let b = a + 1; b < rs.length; b++) {
+      const p = rs[a], q = rs[b];
+      if (p[0] <= q[2] && q[0] <= p[2] && p[1] <= q[3] && q[1] <= p[3]) par[find(a)] = find(b);
+    }
+    const best = new Map();
+    rs.forEach((r, i) => { const g = find(i), area = (r[2] - r[0]) * (r[3] - r[1]); if (!best.has(g) || best.get(g).area < area) best.set(g, { area, x: (r[0] + r[2]) / 2, y: (r[1] + r[3]) / 2 }); });
+    const shape = { rects: rs, edges, icons: [...best.values()] };
+    if (trapCache.size > 50) trapCache.clear();
+    trapCache.set(key, shape);
+    return shape;
+  }
+  function drawTraps(ctx, rects, t) {
+    if (!rects.length) return;
+    const S = trapShape(rects);
+    const path = () => { ctx.beginPath(); for (const r of S.rects) ctx.rect(r[0], r[1], r[2] - r[0], r[3] - r[1]); };
     ctx.save();
     const a = 0.32 + 0.12 * Math.sin(t * 4);
-    ctx.fillStyle = `rgba(255,60,80,${a})`;
-    ctx.fillRect(x, y, w, h);
-    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    path(); // 同じ向きの四角を1つのパスで塗る＝重なったところも濃くならない
+    ctx.fillStyle = `rgba(255,60,80,${a})`; ctx.fill();
+    ctx.clip();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const r of S.rects) { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[2]); y1 = Math.max(y1, r[3]); }
+    const h = y1 - y0;
     ctx.strokeStyle = 'rgba(255,90,110,0.55)'; ctx.lineWidth = 3;
-    for (let k = -h; k < w; k += 12) { ctx.beginPath(); ctx.moveTo(x + k, y + h); ctx.lineTo(x + k + h, y); ctx.stroke(); }
+    ctx.beginPath();
+    for (let k = -h; k < x1 - x0; k += 12) { ctx.moveTo(x0 + k, y1); ctx.lineTo(x0 + k + h, y0); }
+    ctx.stroke();
+    // 輪郭は外まわりだけ（形の内側に半分だけ見える）
+    ctx.strokeStyle = '#ff4d5e'; ctx.lineWidth = 4; ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    for (const e of S.edges) { ctx.moveTo(e[0], e[1]); ctx.lineTo(e[2], e[3]); }
+    ctx.stroke();
     ctx.restore();
-    ctx.strokeStyle = '#ff4d5e'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
-    ctx.strokeRect(x + 1, y + 1, w - 2, h - 2); ctx.setLineDash([]);
     ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('⚠', x + w / 2, y + h / 2);
+    for (const ic of S.icons) ctx.fillText('⚠', ic.x, ic.y);
   }
-
+  // 斜めの床（はじめからある）：壁と同じ色の太い棒
+  function drawSlope(ctx, s, C) {
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = C.wall; ctx.lineWidth = PH.SLOPE_R * 2;
+    ctx.beginPath(); ctx.moveTo(s[0], s[1]); ctx.lineTo(s[2], s[3]); ctx.stroke();
+    // 上側のふち（壁の上面と同じ明るい色）
+    const dx = s[2] - s[0], dy = s[3] - s[1], L = Math.hypot(dx, dy) || 1;
+    let nx = dy / L, ny = -dx / L;
+    if (ny > 0) { nx = -nx; ny = -ny; }
+    ctx.strokeStyle = C.wallTop; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(s[0] + nx * 3, s[1] + ny * 3); ctx.lineTo(s[2] + nx * 3, s[3] + ny * 3); ctx.stroke();
+    ctx.restore();
+  }
   function drawTunnel(ctx, tn, t) {
     if (!tn.enter) { // 出口：入れない。うすい輪だけ（番号は出さない。どこに出るかは声で伝え合う）
       ctx.save();
