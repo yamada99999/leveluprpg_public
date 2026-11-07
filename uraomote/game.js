@@ -11,6 +11,11 @@
   const LEAN = 0.4;     // 「ゆっくり」中の重力の強さ
   const CP_CONFIRM = 1.2;    // トンネルを抜けてこの秒数無事ならチェックポイント
   const RESPAWN_HOLD = 1.2;  // 復活後に玉を止めておく秒数
+  // 2台の傾きのずれチェック（背中合わせで一緒に傾けていないと強制やり直し）
+  const SYNC_LIMIT = 40 * Math.PI / 180; // これ以上ずれたら「ずれている」
+  const SYNC_TIME = 0.6;                 // ずれがこの秒数続いたらアウト
+  const SYNC_OK = 20 * Math.PI / 180;    // やり直し後、ここまでそろえば再開
+  const REALIGN_TIME = 0.5;
 
   const LEVELS = window.URA_LEVELS;
   const CFG = window.URA_CONFIG;
@@ -137,11 +142,6 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.classList.remove('show'), ms);
   }
-  function alertBox(title, text) {
-    $('al-title').textContent = title;
-    $('al-text').textContent = text;
-    $('alert').classList.remove('hidden');
-  }
 
   // ---------- ゲーム ----------
   let G = null;
@@ -149,15 +149,24 @@
   function buildSide(L, side, pick) {
     const S = L[side] || {};
     const walls = [[0, 0, W, WALL], [0, H - WALL, W, WALL], [0, 0, WALL, H], [W - WALL, 0, WALL, H], ...(S.walls || [])];
-    const traps = (S.trapGroups || []).map((grp, gi) => grp[((pick && pick[side]) || [])[gi] || 0]);
+    // seen … この面の人にだけ見える危険地帯（この面の座標）
+    const sc = (L.scenarios || [])[(pick && pick.s) || 0];
+    const seen = ((sc && sc[side]) || []).map((r) => r.slice());
     const stars = (S.stars || []).map((s) => ({ ...s, r: s.r || 15 }));
-    const tunnels = (L.tunnels || []).map((t) => ({ id: t.id, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y }));
-    return { walls, traps, stars, tunnels };
+    // トンネルは一方通行：from の面が入口、反対の面は出口
+    const tunnels = (L.tunnels || []).map((t) => ({ id: t.id, r: t.r || 22, x: side === 'A' ? t.x : W - t.x, y: t.y, enter: (t.from || 'A') === side }));
+    return { walls, seen, danger: [], stars, tunnels };
+  }
+  const mirrorRect = (r) => [W - r[0] - r[2], r[1], r[2], r[3]];
+  function buildSides(L, pick) {
+    const sides = { A: buildSide(L, 'A', pick), B: buildSide(L, 'B', pick) };
+    // 危険地帯は束を貫く場所：自分に見えるものも、相棒に見えるもの（真裏）も、両方触れたらアウト
+    for (const s of ['A', 'B']) sides[s].danger = [...sides[s].seen, ...sides[other(s)].seen.map(mirrorRect)];
+    return sides;
   }
   function randomPick(L) {
-    const p = {};
-    for (const s of ['A', 'B']) p[s] = ((L[s] && L[s].trapGroups) || []).map((g) => Math.floor(Math.random() * g.length));
-    return p;
+    const n = (L.scenarios || []).length;
+    return { s: n ? Math.floor(Math.random() * n) : 0 };
   }
 
   function startStage(idx, pick) {
@@ -165,7 +174,8 @@
     App.stageSel = idx;
     G = {
       idx, L,
-      sides: { A: buildSide(L, 'A', pick), B: buildSide(L, 'B', pick) },
+      pick,
+      sides: buildSides(L, pick),
       goal: { ...L.goal, r: L.goal.r || 24 },
       collected: new Set(),
       total: ((L.A.stars || []).length + (L.B.stars || []).length),
@@ -192,15 +202,16 @@
   function send(m) { if (App.mode !== 'solo') Link.send(m); }
 
   function update(dt) {
+    if (App.mode !== 'solo' && !Link.open) return; // 通信が切れている間は一時停止
     if (G.phase === 'count') {
       const prev = Math.ceil(G.count);
       G.count -= dt;
       const c = Math.ceil(G.count);
       if (G.count <= 0) {
-        G.phase = 'play'; G.t0 = now();
+        G.phase = 'play'; G.t0 = now() - (G.resumeElapsed || 0) * 1000;
         Snd.play('go'); showCount('GO!', 600);
         if (owns()) toast('玉はあなたの画面にあります');
-        else toast('玉は相棒の画面。赤い罠を教えてあげて！');
+        else toast('玉は相棒の画面。赤い危険地帯を教えてあげて！');
       } else if (c !== prev) { Snd.play('count'); showCount(String(c)); }
       return;
     }
@@ -212,6 +223,12 @@
       return;
     }
     if (!owns()) return;
+    // 2台の傾きがずれ続けたら強制やり直し
+    const sd = syncDiff();
+    if (!G.ball.alignWait && sd !== null && sd > SYNC_LIMIT) {
+      G.desyncT = (G.desyncT || 0) + dt;
+      if (G.desyncT >= SYNC_TIME) { G.desyncT = 0; fail('desync'); return; }
+    } else G.desyncT = 0;
     if (G.pendingCp) {
       G.pendingCp.t -= dt;
       if (G.pendingCp.t <= 0) {
@@ -226,7 +243,14 @@
 
   function stepBall(dt) {
     const b = G.ball, S = G.sides[b.side];
-    if (b.hold > 0) { b.hold -= dt; b.vx = 0; b.vy = 0; return; } // 復活直後は少し待つ（束を水平に戻す時間）
+    if (b.alignWait) { // ずれでやり直したあとは、2台がそろうまで玉を止めておく
+      const sd = syncDiff();
+      b.vx = 0; b.vy = 0;
+      if (sd === null || sd < SYNC_OK) { b.alignT = (b.alignT || 0) + dt; if (b.alignT >= REALIGN_TIME) { b.alignWait = false; b.hold = 0.5; toast('そろった！ 再開'); } }
+      else b.alignT = 0;
+      return;
+    }
+    if (b.hold > 0) { b.hold -= dt; b.vx = 0; b.vy = 0; return; } // 復活直後は少し待つ（束をまっすぐに戻す時間）
     const g = sideGravity(b.side);
     b.vx += g[0] * G_ACC * dt;
     b.vy += g[1] * G_ACC * dt;
@@ -276,23 +300,25 @@
   }
 
   function checkObjects(b, S) {
-    for (const r of S.traps) {
-      if (rectDist(b.x, b.y, r) < R * 0.55) { fail(); return true; }
-    }
+    // ★とゴールを先に判定する（危険地帯と近くても、ゴールに入ったらゴールを優先）
     for (const s of S.stars) {
       if (!G.collected.has(s.id) && Math.hypot(b.x - s.x, b.y - s.y) < s.r + R) collect(s.id, true);
-    }
-    for (const t of S.tunnels) {
-      const d = Math.hypot(b.x - t.x, b.y - t.y);
-      if (b.ign === t.id) { if (d > t.r + R + 2) b.ign = null; continue; }
-      if (d < t.r * 0.6) { enterTunnel(t); return true; }
     }
     if (G.goal.side === b.side) {
       const d = Math.hypot(b.x - G.goal.x, b.y - G.goal.y);
       if (d < G.goal.r * 0.8) {
         if (G.collected.size >= G.total) { clearStage(); return true; }
-        if (now() - G.lockToast > 2500) { G.lockToast = now(); toast(`ゴールはまだ閉じている（★ ${G.collected.size}/${G.total}）`); }
+        if (now() - G.lockToast > 2500) { G.lockToast = now(); toast(`🔒 ゴールはまだ閉じている（★ ${G.collected.size}/${G.total}）`); }
       }
+    }
+    for (const r of S.danger) {
+      if (rectDist(b.x, b.y, r) < R * 0.55) { fail(); return true; }
+    }
+    for (const t of S.tunnels) {
+      if (!t.enter) continue; // 出口からは入れない
+      const d = Math.hypot(b.x - t.x, b.y - t.y);
+      if (b.ign === t.id) { if (d > t.r + R + 2) b.ign = null; continue; }
+      if (d < t.r * 0.6) { enterTunnel(t); return true; }
     }
     return false;
   }
@@ -306,17 +332,31 @@
     if (mine) send({ t: 'star', id });
   }
 
-  function fail() {
+  function fail(reason = 'trap') {
     const b = G.ball;
     G.misses++;
     G.flash = { side: b.side, x: b.x, y: b.y, t: now(), type: 'fail' };
     b.hidden = true;
     Snd.play('fail'); vib(250);
-    toast('💥 罠にはまった！ チェックポイントから再開');
-    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses });
+    toast(reason === 'desync' ? '🙅 2台の傾きがずれた！ 背中合わせに戻して、チェックポイントからやり直し' : '💥 危険地帯に触れた！ チェックポイントから再開', 2600);
+    send({ t: 'fail', side: b.side, x: b.x, y: b.y, misses: G.misses, reason });
     G.pendingCp = null;
     G.busy = 0.9;
-    G.after = () => { const cp = G.checkpoint; placeBall(cp.side, cp.x, cp.y, 0, 0, cp.ign, 'respawn'); };
+    G.after = () => {
+      const cp = G.checkpoint;
+      placeBall(cp.side, cp.x, cp.y, 0, 0, cp.ign, reason === 'desync' ? 'realign' : 'respawn');
+    };
+  }
+
+  // 自分の傾きと、相棒の傾き（自分の面に直したもの）の角度の差。比べられないときは null
+  function syncDiff() {
+    if (App.mode === 'solo' || params.get('nosync') === '1') return null;
+    if (!Sensor.live() || !partnerSensor()) return null; // 片方にセンサーがない（PC など）ときはチェックしない
+    const a = Sensor.g, p = App.partner.g;
+    const pm = [-p[0], p[1]];
+    if (Math.hypot(a[0], a[1]) < 0.5 || Math.hypot(pm[0], pm[1]) < 0.5) return null; // 寝かせすぎで向きが不安定
+    const d = Math.atan2(a[1], a[0]) - Math.atan2(pm[1], pm[0]);
+    return Math.abs(Math.atan2(Math.sin(d), Math.cos(d)));
   }
 
   function enterTunnel(t) {
@@ -330,8 +370,16 @@
     G.after = () => placeBall(to, exit.x, exit.y, vx, vy, t.id, 'tunnel');
   }
 
+  function makeBall(side, x, y, vx, vy, ign, reason) {
+    return {
+      side, x, y, vx, vy, ign, hidden: false,
+      hold: reason === 'respawn' ? RESPAWN_HOLD : 0,
+      alignWait: reason === 'realign', alignT: 0,
+    };
+  }
+
   function placeBall(side, x, y, vx, vy, ign, reason) {
-    G.ball = { side, x, y, vx, vy, ign, hidden: false, hold: reason === 'respawn' ? RESPAWN_HOLD : 0 };
+    G.ball = makeBall(side, x, y, vx, vy, ign, reason);
     G.pendingCp = reason === 'tunnel' ? { side, x, y, ign, t: CP_CONFIRM } : null;
     if (App.mySides.includes(side)) {
       if (reason === 'tunnel') {
@@ -340,7 +388,7 @@
       }
     } else {
       send({ t: 'place', side, x, y, vx, vy, ign, reason });
-      if (reason === 'tunnel') toast('玉は相棒の画面へ！ 赤い罠を教えてあげて');
+      if (reason === 'tunnel') toast('玉は相棒の画面へ！ 赤い危険地帯を教えてあげて');
       else toast('玉は相棒の画面で再開');
     }
   }
@@ -363,7 +411,7 @@
     const stars = res.misses === 0 ? 3 : res.misses <= 2 ? 2 : 1;
     $('rs-title').textContent = 'ステージクリア！';
     $('rs-rank').textContent = '★'.repeat(stars) + '☆'.repeat(3 - stars);
-    $('rs-detail').innerHTML = `タイム ${fmtTime(res.time)}　／　罠 ${res.misses}回`;
+    $('rs-detail').innerHTML = `タイム ${fmtTime(res.time)}　／　ミス ${res.misses}回`;
     const leader = App.mode !== 'guest';
     $('rs-host').classList.toggle('hidden', !leader);
     $('rs-wait').classList.toggle('hidden', leader);
@@ -394,17 +442,18 @@
   function onMsg(m) {
     App.lastRecv = now();
     switch (m.t) {
-      case 'hello': App.connected = true; renderLobby(); break;
+      case 'hello': renderLobby(); break;
       case 'in':
         App.partner = { k: m.k | 0, lean: !!m.lean, s: !!m.s, g: Array.isArray(m.g) ? m.g : [0, 1], t: now() };
         if (App.mode === 'guest' && typeof m.th === 'number') App.theta = m.th;
         break;
       case 'start': if (App.mode === 'guest') startStage(m.stage, m.pick); break;
+      case 'sync': if (App.mode === 'guest') resumeStage(m); break;
       case 'lobby': if (App.mode === 'guest') goLobby(); break;
       case 'place':
         if (!G) break;
         G.busy = 0; G.after = null;
-        G.ball = { side: m.side, x: m.x, y: m.y, vx: m.vx, vy: m.vy, ign: m.ign, hidden: false, hold: m.reason === 'respawn' ? RESPAWN_HOLD : 0 };
+        G.ball = makeBall(m.side, m.x, m.y, m.vx, m.vy, m.ign, m.reason);
         G.pendingCp = m.reason === 'tunnel' ? { side: m.side, x: m.x, y: m.y, ign: m.ign, t: CP_CONFIRM } : null;
         Snd.play('arrive'); vib(60);
         toast(m.reason === 'tunnel' ? '玉がこっちに来た！' : '玉はこっちで再開');
@@ -415,8 +464,8 @@
         if (!G) break;
         G.misses = m.misses;
         G.flash = { side: m.side, x: m.x, y: m.y, t: now(), type: 'fail' };
-        Snd.play('fail');
-        toast('💥 相棒側で罠にはまった！');
+        Snd.play('fail'); vib(250);
+        toast(m.reason === 'desync' ? '🙅 2台の傾きがずれた！ 背中合わせに戻してやり直し' : '💥 相棒側で危険地帯に触れた！', 2600);
         break;
       case 'clear': if (G) showResult(m); break;
     }
@@ -502,7 +551,12 @@
     $('hud-time').textContent = fmtTime(G.phase === 'count' ? 0 : G.elapsed);
     $('hud-miss').textContent = G.misses;
     const lag = App.mode !== 'solo' && Link.open && now() - App.lastRecv > 4000;
-    $('hud-net').textContent = App.mode !== 'solo' && !Link.open ? '切断' : lag ? '通信待ち…' : '';
+    const sd = syncDiff();
+    const net = App.mode !== 'solo' && !Link.open ? '再接続中…' : lag ? '通信待ち…' : '';
+    const sync = sd === null ? '' : sd > SYNC_LIMIT ? '⚠ 傾きがずれてる！' : '🤝';
+    const hn = $('hud-net');
+    hn.textContent = net || sync;
+    hn.classList.toggle('ok', !net && sync === '🤝');
   }
 
   const COLORS = {
@@ -528,8 +582,8 @@
     for (const w of P.walls.slice(4)) ctx.strokeRect(W - w[0] - w[2] + 0.5, w[1] + 0.5, w[2] - 1, w[3] - 1);
     ctx.restore();
 
-    // 相棒の面の罠（自分にだけ見える）
-    for (const r of P.traps) drawTrap(ctx, W - r[0] - r[2], r[1], r[2], r[3], t);
+    // 自分にだけ見える危険地帯（自分の面でも、真裏の相棒の面でも触れたらアウト）
+    for (const r of S.seen) drawTrap(ctx, r[0], r[1], r[2], r[3], t);
 
     // トンネル
     for (const tn of S.tunnels) drawTunnel(ctx, tn, t);
@@ -550,7 +604,10 @@
     const b = G.ball;
     if (b.side === side && !b.hidden && (owns() || G.phase === 'count')) {
       drawBall(ctx, b.x, b.y);
-      if (b.hold > 0) { // 復活待ちのリング
+      if (b.alignWait) { // そろうまで待つ
+        ctx.fillStyle = 'rgba(255,220,120,0.95)'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('2台をそろえて！', clamp(b.x, 70, W - 70), b.y < 80 ? b.y + 36 : b.y - 24);
+      } else if (b.hold > 0) { // 復活待ちのリング
         ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.arc(b.x, b.y, R + 6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (b.hold / RESPAWN_HOLD)); ctx.stroke();
       }
@@ -570,7 +627,7 @@
         if (f.side !== side && f.type === 'fail') {
           ctx.fillStyle = `rgba(255,120,130,${1 - age / 1.2})`;
           ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-          ctx.fillText('ここで罠に！', fx, f.y - 26);
+          ctx.fillText('ここでアウト！', fx, f.y - 26);
         }
       }
     }
@@ -592,6 +649,13 @@
   }
 
   function drawTunnel(ctx, tn, t) {
+    if (!tn.enter) { // 出口：入れない。うすい輪だけ（番号は出さない。どこに出るかは声で伝え合う）
+      ctx.save();
+      ctx.strokeStyle = 'rgba(190,160,255,0.5)'; ctx.lineWidth = 2; ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.arc(tn.x, tn.y, tn.r - 4, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+      return;
+    }
     const g = ctx.createRadialGradient(tn.x, tn.y, 2, tn.x, tn.y, tn.r);
     g.addColorStop(0, '#000'); g.addColorStop(0.7, '#1a0b33'); g.addColorStop(1, '#7c4dff');
     ctx.fillStyle = g;
@@ -601,8 +665,6 @@
     ctx.strokeStyle = 'rgba(200,170,255,0.85)'; ctx.lineWidth = 2.5; ctx.setLineDash([7, 6]);
     ctx.beginPath(); ctx.arc(0, 0, tn.r - 2, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = 'rgba(230,215,255,0.9)'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(String(tn.id), tn.x, tn.y);
   }
 
   function drawGoal(ctx, gl, open, t) {
@@ -696,14 +758,12 @@
   }
 
   // ---------- ロビー ----------
-  let netStatus = { state: '', room: '' };
-  function inviteUrl(room) {
+  function pageUrl() {
     // 確認用サーバー（http://localhost:8095 などポート付き）ではそのページ自身、
     // それ以外（公開ページ・APK）では config.js の公開URLを使う
     const here = location.origin + location.pathname;
     const dev = location.port !== '' || location.protocol === 'file:';
-    const base = dev ? here : (CFG.publicUrl || here);
-    return `${base}?room=${room}`;
+    return dev ? here : (CFG.publicUrl || here);
   }
 
   function goLobby() {
@@ -711,67 +771,100 @@
     App.views = [];
     $('result').classList.add('hidden');
     $('menu').classList.add('hidden');
+    $('netwait').classList.add('hidden');
     renderLobby();
     showScreen('scr-lobby');
   }
 
   function renderLobby() {
-    const solo = App.mode === 'solo', host = App.mode === 'host', guest = App.mode === 'guest';
-    $('lb-title').textContent = solo ? 'ひとりで試す' : host ? 'ルーム（あなたはオモテ）' : 'ルーム（あなたはウラ）';
-    $('lb-room').classList.toggle('hidden', solo);
-    $('lb-code').textContent = Link.room || '-----';
-    const url = host && Link.room ? inviteUrl(Link.room) : '';
-    $('lb-url').textContent = url;
-    $('lb-share').parentElement.classList.toggle('hidden', !host);
+    const solo = App.mode === 'solo';
+    const role = Link.role;
+    const open = Link.open;
+    const host = !solo && role === 'host', guest = !solo && role === 'guest';
+    $('lb-title').textContent = solo ? 'ひとりで試す' : host ? 'あなたは オモテ' : guest ? 'あなたは ウラ' : 'ふたりで遊ぶ';
+    $('lb-net').classList.toggle('hidden', solo);
 
     let st = '';
-    if (solo) st = 'オモテとウラを並べて表示します。<br>罠は「反対側の面」に透けて見えます（実際は相棒にしか見えません）。';
-    else if (App.connected && Link.open) st = '<span class="ok">● 相棒とつながりました！</span>';
-    else if (netStatus.state === 'error') st = `<span class="ng">● ${netStatus.msg}</span>`;
-    else if (host) st = netStatus.state === 'waiting' ? '● 相棒の参加を待っています…<br><small>URLを送るか、コードを教えてね</small>' : '● 準備中…';
-    else if (guest) st = '● ホストにつないでいます…';
+    if (solo) st = 'オモテとウラを並べて表示します。<br>赤い危険地帯は、その面の人にだけ見えます（両方の面で触れたらアウト）。';
+    else if (open) st = '<span class="ok">● 相棒とつながりました！</span>';
+    else if (Link.state === 'reconnecting') st = '<span class="ng">● 接続が切れました。自動でつなぎ直しています…</span>';
+    else if (Link.state === 'waiting') st = '● 相棒を待っています…<br><small>もう1台でもこのページを開いて「ふたりで遊ぶ」を押してね。ゆっくりで大丈夫です。</small>';
+    else st = '● 相棒を探しています…';
+    if (!solo && App.netError) st += `<br><span class="ng">${App.netError}</span>`;
     $('lb-status').innerHTML = st;
 
     const sen = Sensor.live() ? '<span class="ok">● 傾きセンサー：使えます</span>'
       : (isTouch ? '<span class="ng">● 傾きセンサー：使えません（画面のボタンで操作）</span>' : '● 傾きセンサーなし：← →キーで操作します');
     $('lb-sensor').innerHTML = sen;
 
-    const leader = !guest;
+    const leader = solo || host;
     $('lb-host-area').classList.toggle('hidden', !leader);
     if (leader) {
-      $('lb-stages').innerHTML = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`).join('');
-      $('lb-start').disabled = !(solo || (App.connected && Link.open));
+      const html = LEVELS.map((L, i) => `<button data-i="${i}" class="${i === App.stageSel ? 'on' : ''}">${i + 1}. ${L.name}<small>${L.hint}</small></button>`).join('');
+      if ($('lb-stages').dataset.html !== html) { $('lb-stages').innerHTML = html; $('lb-stages').dataset.html = html; }
+      $('lb-start').disabled = !(solo || open);
     }
-    $('lb-wait').textContent = guest ? (App.connected && Link.open ? 'ホストがステージを選んでスタートするのを待っています…' : '') : '';
+    $('lb-wait').textContent = guest && open ? 'オモテの人がステージを選んでスタートするのを待っています…' : '';
   }
   setInterval(() => { if ($('scr-lobby').classList.contains('active')) renderLobby(); }, 1000);
 
   // ---------- 通信イベント ----------
-  Link.on('status', (s) => { netStatus = { ...netStatus, ...s }; renderLobby(); });
-  Link.on('open', () => {
-    App.connected = true; App.lastRecv = now();
-    Link.send({ t: 'hello', side: mySide() });
+  function applyRole(role) {
+    const mode = role === 'host' ? 'host' : 'guest';
+    const changed = App.mode !== mode;
+    App.mode = mode;
+    App.mySides = [mode === 'host' ? 'A' : 'B'];
+    return changed;
+  }
+
+  // 通信が切れている間は、ゲームを一時停止して待つ
+  function syncNetWait() {
+    const show = App.mode !== 'solo' && !!G && !Link.open && $('scr-play').classList.contains('active');
+    $('netwait').classList.toggle('hidden', !show);
+  }
+
+  Link.on('state', () => { renderLobby(); syncNetWait(); });
+  Link.on('open', (role) => {
+    App.netError = '';
+    const changed = applyRole(role);
+    App.lastRecv = now();
+    Link.send({ t: 'hello', role });
     Snd.play('join'); vib(80);
-    renderLobby();
+    if (changed && G) { goLobby(); } // まれに役が入れ替わったときは、ロビーからやり直す
+    if (App.mode === 'host') {
+      // オモテが状況を決める：ゲーム中なら再開データ、そうでなければロビーへ
+      if (G) { const s = snapshot(); Link.send({ t: 'sync', ...s }); resumeStage(s); }
+      else Link.send({ t: 'lobby' });
+    }
+    renderLobby(); syncNetWait();
   });
+  Link.on('lost', () => { renderLobby(); syncNetWait(); });
   Link.on('msg', onMsg);
-  Link.on('error', (e) => {
-    const msg = Link.errorText(e);
-    netStatus = { ...netStatus, state: 'error', msg };
-    if ($('scr-lobby').classList.contains('active')) renderLobby();
-    else { $('title-err').textContent = msg; }
-  });
-  Link.on('close', () => {
-    App.connected = false;
-    if (App.mode === 'solo') return;
-    alertBox('相棒との接続が切れました', 'もう一度ルームを作り直してください。');
-  });
+  Link.on('error', (msg) => { App.netError = msg; renderLobby(); });
+
+  // 再接続したときの再開データ（★・ミス・タイム・チェックポイントは引き継ぐ）
+  function snapshot() {
+    return {
+      stage: G.idx, pick: G.pick, collected: [...G.collected], misses: G.misses,
+      elapsed: G.phase === 'clear' ? G.elapsed : G.elapsed, checkpoint: G.checkpoint, cleared: G.phase === 'clear',
+    };
+  }
+  function resumeStage(s) {
+    startStage(s.stage, s.pick);
+    G.collected = new Set(s.collected || []);
+    G.misses = s.misses || 0;
+    G.resumeElapsed = s.elapsed || 0;
+    const cp = s.checkpoint || G.checkpoint;
+    G.checkpoint = cp;
+    G.ball = { side: cp.side, x: cp.x, y: cp.y, vx: 0, vy: 0, ign: cp.ign, hidden: false, hold: 0 };
+    if (s.cleared) showResult({ time: s.elapsed, misses: s.misses }, true);
+    else toast('つながった！ チェックポイントから再開します');
+  }
 
   // ---------- 入力 ----------
   const KEYMAP = { ArrowLeft: 'keyL', ArrowRight: 'keyR', ArrowDown: 'keyLean', a: 'keyL', d: 'keyR', s: 'keyLean' };
   window.addEventListener('keydown', (e) => {
     const k = KEYMAP[e.key]; if (!k) return;
-    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
     Input[k] = true; e.preventDefault();
   });
   window.addEventListener('keyup', (e) => { const k = KEYMAP[e.key]; if (k) Input[k] = false; });
@@ -801,29 +894,16 @@
     tryFullscreen();
     return p;
   }
-  $('btn-create').addEventListener('click', () => {
+  $('btn-play').addEventListener('click', () => {
     prepDevice();
-    App.mode = 'host'; App.mySides = ['A']; App.connected = false; App.stageSel = 0;
-    netStatus = { state: 'starting', room: '' };
-    Link.host();
-    goLobby();
-  });
-  const joinCodeInput = $('join-code');
-  joinCodeInput.addEventListener('input', () => { joinCodeInput.value = joinCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
-  $('btn-join').addEventListener('click', () => {
-    const code = joinCodeInput.value.trim().toUpperCase();
-    if (code.length !== 5) { $('title-err').textContent = '5文字のルームコードを入れてください'; return; }
-    $('title-err').textContent = '';
-    prepDevice();
-    App.mode = 'guest'; App.mySides = ['B']; App.connected = false;
-    netStatus = { state: 'connecting', room: code };
-    Link.join(code);
+    App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';
+    Link.start();
     goLobby();
   });
   $('btn-solo').addEventListener('click', () => {
     prepDevice();
-    Link.close();
-    App.mode = 'solo'; App.mySides = ['A', 'B']; App.connected = false;
+    Link.stop();
+    App.mode = 'solo'; App.mySides = ['A', 'B'];
     goLobby();
   });
   $('btn-rules').addEventListener('click', () => showScreen('scr-rules'));
@@ -835,23 +915,19 @@
     App.stageSel = Number(b.dataset.i); Snd.play('tap'); renderLobby();
   });
   $('lb-start').addEventListener('click', () => { Snd.init(); leaderStart(App.stageSel); });
-  $('lb-copy').addEventListener('click', async () => {
-    const url = inviteUrl(Link.room);
-    try { await navigator.clipboard.writeText(url); $('lb-copy').textContent = 'コピーしました'; } catch (e) { $('lb-copy').textContent = 'コピーできませんでした'; }
-    setTimeout(() => { $('lb-copy').textContent = 'コピー'; }, 1500);
-  });
   $('lb-share').addEventListener('click', async () => {
-    const url = inviteUrl(Link.room);
-    if (navigator.share) { try { await navigator.share({ title: 'ウラオモテ迷宮', text: `ウラオモテ迷宮で遊ぼう！ ルーム ${Link.room}`, url }); } catch (e) { /* キャンセル */ } }
-    else { try { await navigator.clipboard.writeText(url); $('lb-share').textContent = 'URLをコピーしました'; setTimeout(() => { $('lb-share').textContent = '📤 URLを送る'; }, 1500); } catch (e) { /* noop */ } }
+    const url = pageUrl();
+    if (navigator.share) { try { await navigator.share({ title: 'ウラオモテ迷宮', text: 'ウラオモテ迷宮で遊ぼう！', url }); } catch (e) { /* キャンセル */ } }
+    else { try { await navigator.clipboard.writeText(url); $('lb-share').textContent = 'URLをコピーしました'; setTimeout(() => { $('lb-share').textContent = '📤 このページのURLを送る'; }, 1500); } catch (e) { /* noop */ } }
   });
   const toTitle = () => {
-    Link.close(); G = null; App.views = []; App.mode = null; App.connected = false;
-    $('alert').classList.add('hidden');
+    if (App.mode !== 'solo' && Link.active && !confirm('通信を終了してタイトルに戻りますか？')) return;
+    Link.stop(); G = null; App.views = []; App.mode = null;
+    $('netwait').classList.add('hidden');
     showScreen('scr-title');
   };
   $('lb-leave').addEventListener('click', toTitle);
-  $('al-btn').addEventListener('click', toTitle);
+  $('nw-title').addEventListener('click', toTitle);
 
   // リザルト・メニュー
   $('rs-next').addEventListener('click', () => leaderStart(G.idx + 1));
@@ -869,13 +945,6 @@
   $('mn-lobby').addEventListener('click', leaderLobby);
   $('mn-title').addEventListener('click', toTitle);
 
-  // URLに ?room= があれば参加画面の準備
-  const roomParam = (params.get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
-  if (roomParam) {
-    joinCodeInput.value = roomParam;
-    $('title-err').textContent = '';
-    $('btn-join').textContent = 'このルームに参加する（ウラ）';
-  }
 
   // 開発用：コンソールから状態を見る
   if (params.get('debug') === '1') {
@@ -884,6 +953,7 @@
       get G() { return G; },
       // 物理を手動で進める（自動テスト用）
       step(dt = 1 / 60, n = 1) { for (let i = 0; i < n; i++) update(dt); },
+      start(idx, pick) { startStage(idx, pick); },
     };
   }
 })();
