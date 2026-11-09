@@ -195,54 +195,92 @@
   // deviceorientation の角度から「画面の中での重力の向き」を計算する（iPhone / Android 共通の仕様）。
   // 端末に固定した座標（x右・y下）で、1 = 1G。
   const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  // 傾きの取り方は3通り。届いたものを使う（上ほど優先）：
+  //   ① deviceorientation（向きの角度）
+  //   ② devicemotion（加速度。重力込み）
+  //   ③ GravitySensor / Accelerometer（Chrome の新しいセンサーの仕組み）
+  // 受け取りはページを開いた時点で無条件に始める。許可の確認（requestPermission）は、
+  // 機種を問わず「タップしたとき」にだけ呼び、その返事で受け取りを止めることはしない。
   const Sensor = {
-    enabled: false, g: [0, 1], last: 0, got: false,
+    enabled: false, g: [0, 1], last: 0, got: false, src: '',
     hist: [], // 直近1秒の傾き（通信の遅れを考えて、相棒の値と比べるときに使う）
-    // センサーの受け取りは、いつでも無条件に始める。
-    // 許可の確認（requestPermission）は iPhone／iPad のときだけ。最近の Chrome にもこの関数があり、
-    // タップの外で呼ぶと「拒否」が返る。その返事で受け取りを止めると、Android でセンサーが死ぬため。
-    enable() {
-      let req = null;
+    t: { ori: 0, mot: 0, gen: 0 },
+    diag: { oriN: 0, oriNull: 0, motN: 0, motNull: 0, gen: '—', perm: '—', permM: '—', pq: {} },
+    feed(gx, gy, src) {
+      const k = this.got ? 0.35 : 1;
+      this.g[0] += (gx - this.g[0]) * k;
+      this.g[1] += (gy - this.g[1]) * k;
+      this.got = true; this.src = src;
+      this.last = now();
+      this.hist.push({ t: this.last, x: this.g[0], y: this.g[1] });
+      while (this.hist.length && this.last - this.hist[0].t > 1000) this.hist.shift();
+    },
+    // 加速度（端末の座標・重力込み）→ 画面の中の重力の向き
+    fromAcc(x, y, z, src) {
+      const s = IOS && src === 'mot' ? -1 : 1; // iPhone の devicemotion は向きが逆
+      const ax = x * s, ay = y * s, az = (z || 0) * s, m = Math.hypot(ax, ay, az);
+      if (!(m > 3)) return; // 落下中・おかしな値
+      this.feed(-ax / m, ay / m, src);
+    },
+    listen() {
+      if (this.enabled) return;
+      this.enabled = true;
+      window.addEventListener('deviceorientation', (e) => {
+        if (e.beta == null || e.gamma == null) { this.diag.oriNull++; return; }
+        this.diag.oriN++;
+        const b = e.beta * Math.PI / 180, gm = e.gamma * Math.PI / 180;
+        this.t.ori = now();
+        this.feed(Math.cos(b) * Math.sin(gm), Math.sin(b), 'ori');
+      });
+      window.addEventListener('devicemotion', (e) => {
+        const a = e.accelerationIncludingGravity;
+        if (!a || a.x == null || a.y == null) { this.diag.motNull++; return; }
+        this.diag.motN++;
+        this.t.mot = now();
+        if (now() - this.t.ori < 500) return;
+        this.fromAcc(a.x, a.y, a.z, 'mot');
+      });
+      this.startGeneric();
+    },
+    startGeneric() {
+      if (this.gen) return;
+      const C = window.GravitySensor || window.Accelerometer;
+      if (!C) { this.diag.gen = '未対応'; return; }
       try {
-        if (IOS && typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-          req = DeviceOrientationEvent.requestPermission(); // iPhone はタップ中に呼ぶ必要がある
+        const s = new C({ frequency: 30 });
+        s.addEventListener('reading', () => {
+          this.t.gen = now();
+          if (now() - this.t.ori < 500 || now() - this.t.mot < 500) return;
+          this.fromAcc(s.x, s.y, s.z, 'gen');
+        });
+        s.addEventListener('error', (e) => { this.diag.gen = 'エラー：' + ((e.error && e.error.name) || '?'); this.gen = null; });
+        s.start();
+        this.gen = s;
+        this.diag.gen = '起動';
+      } catch (e) { this.diag.gen = 'エラー：' + e.name; }
+    },
+    // ブラウザの許可の状態を調べる（分かる機種だけ）
+    async query() {
+      if (!navigator.permissions || !navigator.permissions.query) return;
+      for (const name of ['accelerometer', 'gyroscope', 'magnetometer']) {
+        try { this.diag.pq[name] = (await navigator.permissions.query({ name })).state; } catch (e) { this.diag.pq[name] = '不明'; }
+      }
+    },
+    // タップの中で呼ぶ：受け取りを始め、許可の確認があれば出す
+    enable() {
+      this.listen();
+      const asks = [];
+      try {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          asks.push(DeviceOrientationEvent.requestPermission().then((r) => { this.diag.perm = r; return r; }, (e) => { this.diag.perm = 'エラー：' + e.name; return 'error'; }));
         }
-      } catch (e) { req = null; }
-      const feed = (gx, gy) => {
-        const k = this.got ? 0.35 : 1;
-        this.g[0] += (gx - this.g[0]) * k;
-        this.g[1] += (gy - this.g[1]) * k;
-        this.got = true;
-        this.last = now();
-        this.hist.push({ t: this.last, x: this.g[0], y: this.g[1] });
-        while (this.hist.length && this.last - this.hist[0].t > 1000) this.hist.shift();
-      };
-      const start = () => {
-        if (this.enabled) return;
-        this.enabled = true;
-        // ① 向きのセンサー（ふだんはこちら）
-        window.addEventListener('deviceorientation', (e) => {
-          if (e.beta == null || e.gamma == null) return;
-          const b = e.beta * Math.PI / 180, gm = e.gamma * Math.PI / 180;
-          this.oriT = now(); this.src = 'ori';
-          feed(Math.cos(b) * Math.sin(gm), Math.sin(b));
-        });
-        // ② 向きの値が届かないとき（アプリ内ブラウザ・機種によって）は、加速度センサーで重力の向きを取る
-        window.addEventListener('devicemotion', (e) => {
-          if (this.oriT && now() - this.oriT < 500) return;
-          const a = e.accelerationIncludingGravity;
-          if (!a || a.x == null || a.y == null) return;
-          const s = IOS ? -1 : 1; // iPhone は向きが逆
-          const ax = a.x * s, ay = a.y * s, az = (a.z || 0) * s;
-          const m = Math.hypot(ax, ay, az);
-          if (m < 3) return; // 落下中・おかしな値
-          this.src = 'motion';
-          feed(-ax / m, ay / m);
-        });
-      };
-      start();
-      if (req && req.then) return req.then((r) => r === 'granted').catch(() => false);
-      return Promise.resolve(true);
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+          asks.push(DeviceMotionEvent.requestPermission().then((r) => { this.diag.permM = r; return r; }, (e) => { this.diag.permM = 'エラー：' + e.name; return 'error'; }));
+        }
+      } catch (e) { /* noop */ }
+      if (this.diag.gen.startsWith('エラー')) { this.gen = null; this.startGeneric(); } // 許可のあとでやり直す
+      this.query();
+      return Promise.all(asks).then((rs) => rs.every((r) => r === 'granted'));
     },
     // 一度でも値が届けば「使える」。機種によっては動かしたときにしか値が届かないので、時間切れにはしない
     live() { return this.got; },
@@ -262,6 +300,7 @@
     stageSel: 0,
     views: [],
   };
+  const pageT = now(); // ページを開いた時刻（センサーが届かないと判断するまでの待ち時間に使う）
   const Input = { keyL: false, keyR: false, keyLean: false, btnL: false, btnR: false, btnLean: false };
   const localK = () => ((Input.keyR || Input.btnR) ? 1 : 0) - ((Input.keyL || Input.btnL) ? 1 : 0);
   const localLean = () => Input.keyLean || Input.btnLean;
@@ -340,7 +379,7 @@
     init() {
       if (this.worker !== null) return;
       try {
-        this.worker = new Worker('genworker.js?v=4');
+        this.worker = new Worker('genworker.js?v=5');
         this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
         this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
       } catch (e) { this.worker = false; }
@@ -1397,10 +1436,12 @@
 
     // センサーは「スマホが動いたとき」にだけ値が届く機種もあるので、届くまでは「確認中」にしておく（エラー扱いしない）
     let sen;
-    if (Sensor.live()) sen = '<span class="ok">● 傾きセンサー：使えます' + (Sensor.src === 'motion' ? '（加速度センサーで代用中）' : '') + '</span>';
+    if (Sensor.live()) sen = '<span class="ok">● 傾きセンサー：使えます' + (Sensor.src === 'mot' ? '（加速度で代用中）' : Sensor.src === 'gen' ? '（重力センサーで代用中）' : '') + '</span>';
     else if (!isTouch) sen = '● 傾きセンサーなし：← →キーで操作します';
-    else sen = '<span class="wait-s">● 傾きセンサー：確認中…（スマホを少し動かすと反応します。動かないときはここをタップ）</span>';
+    else if (now() - pageT > 4000) sen = '<span class="ng">● 傾きセンサーの値が届いていません。下の「センサーの診断・設定」を開いてね</span>';
+    else sen = '<span class="wait-s">● 傾きセンサー：確認中…（スマホを少し動かすと反応します）</span>';
     $('lb-sensor').innerHTML = sen;
+    $('lb-sdiag').classList.toggle('alert', isTouch && !Sensor.live() && now() - pageT > 4000);
 
     const leader = solo || host;
     $('lb-host-area').classList.toggle('hidden', !leader);
@@ -1514,11 +1555,54 @@
     tryFullscreen();
     return p;
   }
-  // Android など、許可のいらない機種では、ページを開いた時点でセンサーを動かしておく
-  // （QR からアプリ内ブラウザで開いたときなど、ボタンの流れに関係なく必ず届くように）
-  if (!IOS) Sensor.enable();
-  // ロビーのセンサー表示をタップすると、もう一度センサーを有効にする（iPhone の許可のやり直しなど）
-  $('lb-sensor').addEventListener('click', () => { Sensor.enable(); renderLobby(); });
+  // 受け取りはページを開いた時点で始める（許可の確認はタップのときだけ）
+  Sensor.listen();
+  Sensor.query();
+
+  // ---------- センサーの診断・設定 ----------
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  const IN_APP = /Line\/|FBAN|FBAV|Instagram|; wv\)|GSA\//i.test(navigator.userAgent); // LINE・Google アプリなどの中のブラウザ
+  let diagTimer = 0;
+  const PQ_NAME = { accelerometer: '加速度', gyroscope: 'ジャイロ', magnetometer: '磁気' };
+  const PQ_STATE = { granted: '許可', denied: 'ブロック', prompt: '確認待ち' };
+  function renderDiag() {
+    const d = Sensor.diag, fresh = (t) => t && now() - t < 1000;
+    const row = (name, ok, text) => '<div class="dg-row"><span class="dg-mk ' + (ok ? 'ok' : 'ng') + '">' + (ok ? '●' : '×') + '</span><b>' + name + '</b><span>' + text + '</span></div>';
+    const pqKeys = Object.keys(d.pq);
+    const pqText = pqKeys.length ? pqKeys.map((k) => (PQ_NAME[k] || k) + '：' + (PQ_STATE[d.pq[k]] || d.pq[k])).join('・') : '調べられない機種';
+    const blocked = Object.values(d.pq).includes('denied') || d.perm === 'denied' || d.permM === 'denied';
+    const where = IN_APP ? 'アプリの中のブラウザ（センサーが届かないことがある）' : (matchMedia('(display-mode: standalone)').matches ? 'ホーム画面のアプリ' : 'ブラウザ');
+    $('sd-rows').innerHTML =
+      row('向きセンサー', fresh(Sensor.t.ori), d.oriN + ' 回届いた' + (d.oriNull ? '（空っぽ ' + d.oriNull + ' 回）' : '')) +
+      row('加速度（代用）', fresh(Sensor.t.mot), d.motN + ' 回届いた' + (d.motNull ? '（空っぽ ' + d.motNull + ' 回）' : '')) +
+      row('重力センサー（代用）', fresh(Sensor.t.gen), d.gen) +
+      row('ブラウザの許可', !blocked, pqText + (d.perm !== '—' ? '・確認の返事：' + d.perm : '')) +
+      row('開いている場所', !IN_APP, where);
+    const g0 = Sensor.g;
+    $('sd-dot').style.transform = 'translate(' + (g0[0] * 46).toFixed(1) + 'px, ' + (g0[1] * 46 + 46).toFixed(1) + 'px)';
+    $('sd-dot').classList.toggle('live', Sensor.fresh());
+    $('sd-verdict').innerHTML = Sensor.fresh() ? '<span class="ok">傾きが届いています！ スマホを傾けると上の玉が転がります</span>'
+      : blocked ? '<span class="ng">ブラウザの設定で「モーションセンサー」がブロックされています。下の手順で「許可」にしてね</span>'
+      : IN_APP ? '<span class="ng">アプリの中のブラウザで開いています。「Chrome で開き直す」を押してね</span>'
+      : '<span class="ng">値が届いていません。スマホを少し動かしてから「センサーを有効にする」を押し、だめなら下の手順を確かめてね</span>';
+  }
+  function openDiag() {
+    $('sensorbox').classList.remove('hidden');
+    $('sd-chrome').classList.toggle('hidden', !IS_ANDROID);
+    clearInterval(diagTimer);
+    renderDiag();
+    diagTimer = setInterval(() => { if ($('sensorbox').classList.contains('hidden')) { clearInterval(diagTimer); return; } renderDiag(); }, 200);
+  }
+  $('lb-sdiag').addEventListener('click', () => { Sensor.enable(); openDiag(); });
+  $('btn-sdiag').addEventListener('click', () => { Sensor.enable(); openDiag(); });
+  $('lb-sensor').addEventListener('click', () => { Sensor.enable(); openDiag(); });
+  $('sd-enable').addEventListener('click', () => { Sensor.enable().then(() => renderDiag()); renderDiag(); });
+  $('sd-close').addEventListener('click', () => { $('sensorbox').classList.add('hidden'); if ($('scr-lobby').classList.contains('active')) renderLobby(); });
+  // Chrome で開き直す（LINE やカメラの中のブラウザから抜け出す）
+  $('sd-chrome').addEventListener('click', () => {
+    const u = new URL(location.href);
+    location.href = 'intent://' + u.host + u.pathname + u.search + '#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(u.href) + ';end';
+  });
   $('btn-play').addEventListener('click', () => {
     prepDevice();
     App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';
@@ -1558,8 +1642,8 @@
     const b = e.target.closest('button'); if (!b) return;
     App.stageSel = Number(b.dataset.i); Snd.play('tap'); renderLobby();
   });
-  $('lb-start').addEventListener('click', () => { Snd.init(); leaderTutorial(App.stageSel); });
-  $('lb-run').addEventListener('click', () => { Snd.init(); leaderStartRun(); });
+  $('lb-start').addEventListener('click', () => { Snd.init(); if (!Sensor.live()) Sensor.enable(); leaderTutorial(App.stageSel); });
+  $('lb-run').addEventListener('click', () => { Snd.init(); if (!Sensor.live()) Sensor.enable(); leaderStartRun(); });
   $('lb-share').addEventListener('click', async () => {
     const url = joinUrl();
     if (navigator.share) { try { await navigator.share({ title: 'ウラオモテ迷宮', text: 'ウラオモテ迷宮で遊ぼう！', url }); } catch (e) { /* キャンセル */ } }

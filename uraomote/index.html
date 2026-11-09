@@ -11,7 +11,7 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <title>ウラオモテ迷宮</title>
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 
@@ -32,6 +32,7 @@
     <button id="btn-solo" class="btn ghost">ひとりで試す（両面を並べて表示）</button>
     <button id="btn-install" class="btn ghost hidden">📲 アプリとしてホーム画面に入れる</button>
     <button id="btn-rules" class="btn ghost">遊び方</button>
+    <button id="btn-sdiag" class="btn ghost small">🔧 傾きセンサーの診断・設定</button>
     <button id="btn-mute" class="btn ghost small">🔊 音あり</button>
   </div>
 </section>
@@ -86,6 +87,7 @@
   <div class="card">
     <div id="lb-status" class="status"></div>
     <div id="lb-sensor" class="status"></div>
+    <button id="lb-sdiag" class="sdiag-btn">🔧 センサーの診断・設定</button>
   </div>
   <div id="lb-net">
     <div id="lb-qr-card" class="card center qr-card hidden">
@@ -201,6 +203,31 @@
   </div>
 </div>
 
+<!-- 傾きセンサーの診断・設定 -->
+<div id="sensorbox" class="overlay hidden">
+  <div class="ov-card sd-card">
+    <h3>🔧 傾きセンサーの診断</h3>
+    <div class="sd-pad"><div id="sd-dot" class="sd-dot"></div></div>
+    <p id="sd-verdict" class="sd-verdict"></p>
+    <div id="sd-rows"></div>
+    <button id="sd-enable" class="btn">センサーを有効にする（許可の確認を出す）</button>
+    <button id="sd-chrome" class="btn ghost small hidden">Chrome で開き直す</button>
+    <details class="sd-help" open>
+      <summary>設定の場所（Android の Chrome）</summary>
+      <ol>
+        <li>アドレスバーの左の <b>⚙／🔒 マーク</b> → <b>権限</b>（または「サイトの設定」）→ <b>モーションセンサー</b> を <b>許可</b></li>
+        <li>それでもだめなら Chrome 右上の <b>︙</b> → <b>設定</b> → <b>サイトの設定</b> → <b>モーションセンサー</b>：いちばん上のスイッチを <b>オン</b>。下の「ブロック中」に <b>yamada99999.github.io</b> があれば、タップして <b>許可</b></li>
+        <li>ホーム画面のアプリで開いているとき（アドレスバーがない）：Chrome で同じページを開いて 1・2 を行う（アプリにもそのまま効きます）</li>
+        <li>スマホ本体：開発者向けオプションの <b>「センサー OFF」</b>（クイック設定のタイル）がオンになっていないか</li>
+        <li>LINE やカメラから開いたときは、上の「Chrome で開き直す」</li>
+      </ol>
+      <p class="sd-note">※ ブラウザの決まりで、ページの中から設定画面を直接開くことはできません。上の手順でお願いします。</p>
+    </details>
+    <p class="sd-note">片方のスマホだけ使えれば、そのセンサーで2台とも動きます。どちらも使えないときは、画面の ↺ ↻ ボタンで操作できます。</p>
+    <button id="sd-close" class="btn ghost">閉じる</button>
+  </div>
+</div>
+
 <!-- 番号で参加 -->
 <div id="joinbox" class="overlay hidden">
   <div class="ov-card">
@@ -212,13 +239,13 @@
   </div>
 </div>
 
-<script src="config.js?v=4"></script>
-<script src="qr.js?v=4"></script>
-<script src="vendor/peerjs.min.js?v=4"></script>
-<script src="net.js?v=4"></script>
-<script src="levels.js?v=4"></script>
-<script src="physics.js?v=4"></script>
-<script src="gen.js?v=4"></script>
-<script src="game.js?v=4"></script>
+<script src="config.js?v=5"></script>
+<script src="qr.js?v=5"></script>
+<script src="vendor/peerjs.min.js?v=5"></script>
+<script src="net.js?v=5"></script>
+<script src="levels.js?v=5"></script>
+<script src="physics.js?v=5"></script>
+<script src="gen.js?v=5"></script>
+<script src="game.js?v=5"></script>
 </body>
 </html>

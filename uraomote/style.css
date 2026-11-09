@@ -219,3 +219,24 @@ html.fs { --top-min: 30px; --bottom-min: 12px; } /* 全画面表示中は、シ�
 .room b { font-size: 26px; letter-spacing: .18em; color: var(--text); margin-left: 4px; }
 .code-in { display: block; width: 100%; font: inherit; font-size: 34px; font-weight: 900; letter-spacing: .4em; text-align: center; padding: 10px 6px 10px 18px; margin: 6px 0 4px; border-radius: 14px; border: 2px solid var(--line); background: #0e0f1d; color: var(--text); user-select: text; -webkit-user-select: text; }
 .code-in:focus { outline: none; border-color: var(--a); }
+
+/* 傾きセンサーの診断 */
+.sdiag-btn { margin-top: 6px; width: 100%; font: inherit; font-size: 13px; padding: 7px; border-radius: 10px; border: 1.5px solid var(--line); background: transparent; color: var(--muted); }
+.sdiag-btn.alert { border-color: var(--trap); color: #fff; background: rgba(255,80,90,.18); font-weight: 800; }
+.sd-card { max-height: calc(100vh - 32px); overflow-y: auto; text-align: left; }
+.sd-card h3 { text-align: center; }
+.sd-pad { position: relative; width: 120px; height: 120px; margin: 0 auto 6px; border-radius: 50%; border: 2px solid var(--line); background: radial-gradient(circle, #23253f 0, #15162a 70%); }
+.sd-dot { position: absolute; left: 50px; top: 4px; width: 20px; height: 20px; border-radius: 50%; background: #666a8c; transition: transform .1s linear; }
+.sd-dot.live { background: var(--a); box-shadow: 0 0 10px var(--a); }
+.sd-verdict { text-align: center; font-size: 14px !important; font-weight: 700; }
+.sd-verdict .ok { color: var(--ok); }
+.sd-verdict .ng { color: var(--trap); }
+.dg-row { display: grid; grid-template-columns: 18px 8.5em 1fr; gap: 4px; font-size: 12.5px; padding: 4px 0; border-bottom: 1px dashed var(--line); align-items: baseline; }
+.dg-mk.ok { color: var(--ok); }
+.dg-mk.ng { color: var(--trap); }
+.dg-row span:last-child { color: var(--muted); }
+.sd-help { margin: 8px 0; font-size: 13px; }
+.sd-help summary { font-weight: 800; cursor: pointer; }
+.sd-help ol { padding-left: 18px; margin: 6px 0; }
+.sd-help li { margin: 4px 0; line-height: 1.55; }
+.sd-note { font-size: 12px !important; color: var(--muted); line-height: 1.5; }
