@@ -194,34 +194,54 @@
   // ---------- 傾きセンサー ----------
   // deviceorientation の角度から「画面の中での重力の向き」を計算する（iPhone / Android 共通の仕様）。
   // 端末に固定した座標（x右・y下）で、1 = 1G。
+  const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
   const Sensor = {
     enabled: false, g: [0, 1], last: 0, got: false,
     hist: [], // 直近1秒の傾き（通信の遅れを考えて、相棒の値と比べるときに使う）
+    // センサーの受け取りは、いつでも無条件に始める。
+    // 許可の確認（requestPermission）は iPhone／iPad のときだけ。最近の Chrome にもこの関数があり、
+    // タップの外で呼ぶと「拒否」が返る。その返事で受け取りを止めると、Android でセンサーが死ぬため。
     enable() {
       let req = null;
       try {
-        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        if (IOS && typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
           req = DeviceOrientationEvent.requestPermission(); // iPhone はタップ中に呼ぶ必要がある
         }
       } catch (e) { req = null; }
+      const feed = (gx, gy) => {
+        const k = this.got ? 0.35 : 1;
+        this.g[0] += (gx - this.g[0]) * k;
+        this.g[1] += (gy - this.g[1]) * k;
+        this.got = true;
+        this.last = now();
+        this.hist.push({ t: this.last, x: this.g[0], y: this.g[1] });
+        while (this.hist.length && this.last - this.hist[0].t > 1000) this.hist.shift();
+      };
       const start = () => {
         if (this.enabled) return;
         this.enabled = true;
+        // ① 向きのセンサー（ふだんはこちら）
         window.addEventListener('deviceorientation', (e) => {
           if (e.beta == null || e.gamma == null) return;
           const b = e.beta * Math.PI / 180, gm = e.gamma * Math.PI / 180;
-          const gx = Math.cos(b) * Math.sin(gm), gy = Math.sin(b);
-          const k = this.got ? 0.35 : 1;
-          this.g[0] += (gx - this.g[0]) * k;
-          this.g[1] += (gy - this.g[1]) * k;
-          this.got = true;
-          this.last = now();
-          this.hist.push({ t: this.last, x: this.g[0], y: this.g[1] });
-          while (this.hist.length && this.last - this.hist[0].t > 1000) this.hist.shift();
+          this.oriT = now(); this.src = 'ori';
+          feed(Math.cos(b) * Math.sin(gm), Math.sin(b));
+        });
+        // ② 向きの値が届かないとき（アプリ内ブラウザ・機種によって）は、加速度センサーで重力の向きを取る
+        window.addEventListener('devicemotion', (e) => {
+          if (this.oriT && now() - this.oriT < 500) return;
+          const a = e.accelerationIncludingGravity;
+          if (!a || a.x == null || a.y == null) return;
+          const s = IOS ? -1 : 1; // iPhone は向きが逆
+          const ax = a.x * s, ay = a.y * s, az = (a.z || 0) * s;
+          const m = Math.hypot(ax, ay, az);
+          if (m < 3) return; // 落下中・おかしな値
+          this.src = 'motion';
+          feed(-ax / m, ay / m);
         });
       };
-      if (req && req.then) return req.then((r) => { if (r === 'granted') start(); return r === 'granted'; }).catch(() => false);
       start();
+      if (req && req.then) return req.then((r) => r === 'granted').catch(() => false);
       return Promise.resolve(true);
     },
     // 一度でも値が届けば「使える」。機種によっては動かしたときにしか値が届かないので、時間切れにはしない
@@ -320,7 +340,7 @@
     init() {
       if (this.worker !== null) return;
       try {
-        this.worker = new Worker('genworker.js?v=3');
+        this.worker = new Worker('genworker.js?v=4');
         this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
         this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
       } catch (e) { this.worker = false; }
@@ -1377,9 +1397,9 @@
 
     // センサーは「スマホが動いたとき」にだけ値が届く機種もあるので、届くまでは「確認中」にしておく（エラー扱いしない）
     let sen;
-    if (Sensor.live()) sen = '<span class="ok">● 傾きセンサー：使えます</span>';
+    if (Sensor.live()) sen = '<span class="ok">● 傾きセンサー：使えます' + (Sensor.src === 'motion' ? '（加速度センサーで代用中）' : '') + '</span>';
     else if (!isTouch) sen = '● 傾きセンサーなし：← →キーで操作します';
-    else sen = '<span class="wait-s">● 傾きセンサー：確認中…（スマホを少し動かすと反応します）</span>';
+    else sen = '<span class="wait-s">● 傾きセンサー：確認中…（スマホを少し動かすと反応します。動かないときはここをタップ）</span>';
     $('lb-sensor').innerHTML = sen;
 
     const leader = solo || host;
@@ -1494,6 +1514,11 @@
     tryFullscreen();
     return p;
   }
+  // Android など、許可のいらない機種では、ページを開いた時点でセンサーを動かしておく
+  // （QR からアプリ内ブラウザで開いたときなど、ボタンの流れに関係なく必ず届くように）
+  if (!IOS) Sensor.enable();
+  // ロビーのセンサー表示をタップすると、もう一度センサーを有効にする（iPhone の許可のやり直しなど）
+  $('lb-sensor').addEventListener('click', () => { Sensor.enable(); renderLobby(); });
   $('btn-play').addEventListener('click', () => {
     prepDevice();
     App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';
@@ -1509,7 +1534,7 @@
   }
   $('btn-join').addEventListener('click', () => { $('jn-code').value = ''; $('jn-ok').disabled = true; $('joinbox').classList.remove('hidden'); setTimeout(() => $('jn-code').focus(), 50); });
   $('jn-cancel').addEventListener('click', () => $('joinbox').classList.add('hidden'));
-  $('jn-code').addEventListener('input', () => { $('jn-code').value = $('jn-code').value.replace(/D/g, '').slice(0, 4); $('jn-ok').disabled = $('jn-code').value.length !== 4; });
+  $('jn-code').addEventListener('input', () => { $('jn-code').value = $('jn-code').value.replace(/\D/g, '').slice(0, 4); $('jn-ok').disabled = $('jn-code').value.length !== 4; });
   $('jn-ok').addEventListener('click', () => { const c = $('jn-code').value; if (c.length !== 4) return; $('joinbox').classList.add('hidden'); joinRoom(c); });
   $('btn-solo').addEventListener('click', () => {
     prepDevice();
@@ -1518,7 +1543,7 @@
     goLobby();
   });
   // QR／URL から来たとき：「参加する」を出す（センサー・全画面・音には1回タップが要るため）
-  const inviteCode = (params.get('join') || '').replace(/D/g, '');
+  const inviteCode = (params.get('join') || '').replace(/\D/g, '');
   if (params.has('join')) {
     try { const q = new URLSearchParams(location.search); q.delete('join'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) { /* noop */ }
     if (inviteCode.length === 4) { $('iv-code').textContent = inviteCode; $('invite').classList.remove('hidden'); }

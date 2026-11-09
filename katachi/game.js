@@ -74,7 +74,7 @@
   const auth = () => App.mode === 'local' || App.role === 'A';
   // 「自分」：2台なら自分の役。1台なら、いま手番の人
   const me = () => (App.mode === 'net' ? App.role : (S ? S.turn : 'A'));
-  const myTurn = () => S && S.phase === 'play' && !S.fin && (App.mode === 'local' || S.turn === App.role);
+  const myTurn = () => S && S.phase === 'play' && (App.mode === 'local' || S.turn === App.role);
   const send = (m) => { if (App.mode === 'net') Link.send(m); };
 
   // ---------- お題を配る ----------
@@ -123,10 +123,11 @@
     send({ t: 'state', S });
     onState();
   }
+  // 1手おわり。完成が宣言されていたら（＝これが相手の最後の1手）、答え合わせへ
   function endTurn() {
     S.left--;
     S.turn = other(S.turn);
-    if (S.left <= 0) startGuess();
+    if (S.left <= 0 || S.fin) startGuess();
   }
   function startGuess() {
     S.phase = 'guess'; S.fin = null;
@@ -147,7 +148,7 @@
     if (!S || !a) return;
     switch (a.kind) {
       case 'place': {
-        if (S.phase !== 'play' || S.fin || S.turn !== by) return;
+        if (S.phase !== 'play' || S.turn !== by) return;
         const p = S.palette[a.pi];
         if (!p || p.k !== a.s.k) return;
         const sh = { id: S.nextId++, k: p.k, c: p.c, ...tf(a.s) };
@@ -158,7 +159,7 @@
         break;
       }
       case 'move': {
-        if (S.phase !== 'play' || S.fin || S.turn !== by) return;
+        if (S.phase !== 'play' || S.turn !== by) return;
         const i = S.shapes.findIndex((x) => x.id === a.id);
         if (i < 0) return;
         const sh = { ...S.shapes[i], ...tf(a.s) };
@@ -169,19 +170,19 @@
         break;
       }
       case 'reload':
-        if (S.phase !== 'play' || S.fin || S.turn !== by) return;
+        if (S.phase !== 'play' || S.turn !== by) return;
         S.palette = freshPalette();
         S.last = { by, kind: 'reload' };
         endTurn();
         break;
       case 'finish':
-        if (S.phase !== 'play' || S.fin || S.turn !== by) return;
-        if (App.mode === 'local') { startGuess(); break; } // 1台：その場で2人で決める
+        // 完成の宣言：相手に最後の1手を回す（手数が残っていれば）。
+        // 相手も「完成！」なら、そのまま答え合わせ
+        if (S.phase !== 'play' || S.turn !== by) return;
+        if (S.fin || S.left <= 0) { startGuess(); break; }
         S.fin = by;
-        break;
-      case 'finAns':
-        if (S.phase !== 'play' || !S.fin || S.fin === by) return;
-        if (a.ok) startGuess(); else { S.fin = null; S.last = { by, kind: 'notyet' }; }
+        S.turn = other(by);
+        S.last = { by, kind: 'finish' };
         break;
       case 'guess':
         if (S.phase !== 'guess' || !Array.isArray(a.ans)) return;
@@ -249,11 +250,14 @@
       if (L.kind === 'place') Snd.play('place');
       else if (L.kind === 'move') Snd.play('move');
       else if (L.kind === 'reload') { Snd.play('reload'); if (!mine) toast(App.mode === 'net' ? '相棒が選択肢を入れかえた' : '選択肢を入れかえた'); }
-      else if (L.kind === 'notyet' && App.mode === 'net') toast(L.by === App.role ? 'もう少し描こう' : '相棒は「まだ描く」そうです');
-      if (App.mode === 'net' && S.phase === 'play' && S.turn === App.role && L.by !== App.role && L.kind !== 'notyet') { Snd.play('turn'); vib(30); }
+      else if (L.kind === 'finish' && S.phase === 'play') {
+        Snd.play('ask'); vib([40, 40, 40]);
+        toast(App.mode === 'net' ? (L.by === App.role ? '完成を宣言！ 相棒の最後の1手を待とう' : '相棒が完成を宣言！ 最後の1手です（「完成！」ならそのまま答え合わせ）') : `${L.by} さんが完成を宣言！ ${S.turn} さんの最後の1手です（「完成！」ならそのまま答え合わせ）`, 3600);
+      }
+      if (App.mode === 'net' && S.phase === 'play' && S.turn === App.role && L.by !== App.role && L.kind !== 'finish') { Snd.play('turn'); vib(30); }
     }
     if (S.v === 1 && prev !== 1 && S.phase === 'play') {
-      ['guess', 'reveal', 'finreq', 'menu', 'handoff'].forEach((id) => $(id).classList.add('hidden'));
+      ['guess', 'reveal', 'menu', 'handoff'].forEach((id) => $(id).classList.add('hidden'));
       toast(App.mode === 'net' ? (S.turn === App.role ? 'あなたから！ 自分のお題をよく見て' : '相棒から！ 自分のお題をよく見て') : `${S.turn} さんから。お題は長押しでこっそり見てね`, 3000);
     }
     renderUI();
@@ -303,29 +307,29 @@
     const tn = $('pl-turn');
     const mineTurn = myTurn();
     if (S.phase !== 'play') tn.innerHTML = '答え合わせ';
-    else if (App.mode === 'local') tn.innerHTML = `<span style="color:var(--${S.turn === 'A' ? 'a' : 'b'}-deep)">${S.turn} さんの番</span><small>残り ${S.left} 手（2人で）</small>`;
-    else if (mineTurn) tn.innerHTML = `あなたの番<small>残り ${S.left} 手（2人で）</small>`;
-    else tn.innerHTML = `相棒の番<small>残り ${S.left} 手・声で相談しよう</small>`;
+    else if (App.mode === 'local') tn.innerHTML = `<span style="color:var(--${S.turn === 'A' ? 'a' : 'b'}-deep)">${S.turn} さんの${S.fin ? '最後の1手' : '番'}</span><small>${S.fin ? `${S.fin} さんが完成を宣言` : `残り ${S.left} 手（2人で）`}</small>`;
+    else if (mineTurn) tn.innerHTML = S.fin ? `あなたの最後の1手<small>相棒が完成を宣言しました</small>` : `あなたの番<small>残り ${S.left} 手（2人で）</small>`;
+    else tn.innerHTML = S.fin ? `相棒の最後の1手<small>完成を宣言しました</small>` : `相棒の番<small>残り ${S.left} 手・声で相談しよう</small>`;
     tn.className = 'turn' + (mineTurn ? ' me' + (me() === 'B' ? ' b' : '') : '');
-    $('pl-finish').disabled = !mineTurn || !!E || !S.shapes.length;
+    $('pl-finish').disabled = !mineTurn || !!E || (!S.shapes.length && !S.fin);
     // 下の選択肢 or 操作中のボタン
-    $('pl-palette').classList.toggle('hidden', !!E);
-    $('pl-edit').classList.toggle('hidden', !E);
+    const editing = !!E && E.drag !== 'paldrag';
+    $('pl-palette').classList.toggle('hidden', editing);
+    $('pl-edit').classList.toggle('hidden', !editing);
     if (E) {
       // いちばん前なら「前へ」は出さない。いちばん後ろなら「後ろへ」は出さない
       const n = restOf().length;
-      $('ed-front').classList.toggle('hidden', E.o >= n);
-      $('ed-back').classList.toggle('hidden', E.o <= 0);
+      $('ed-front').disabled = E.o >= n;
+      $('ed-back').disabled = E.o <= 0;
     }
     renderPalette();
     // 見守り中の表示
     const w = $('pl-watch');
     if (App.mode === 'net' && S.phase === 'play' && !mineTurn) {
       w.classList.remove('hidden');
-      w.textContent = S.fin === App.role ? '相棒の返事を待っています…' : Live ? '相棒が図形を動かしています…' : '相棒の番です';
+      w.textContent = Live ? '相棒が図形を動かしています…' : S.fin ? '相棒の最後の1手です' : '相棒の番です';
     } else w.classList.add('hidden');
     // 重ねる画面
-    renderFinReq();
     renderGuess();
     renderReveal();
   }
@@ -494,12 +498,20 @@
     if (!(E && E.drag === 'paldrag' && e.pointerId === E.pid)) return;
     const moved = Math.hypot(e.clientX - E.sx0, e.clientY - E.sy0);
     const pt = toPaper(e);
-    if (moved < 10) { E.s.x = PW / 2; E.s.y = PH / 2; E.drag = null; } // タップ：真ん中へ
+    guardUntil = now() + 450; // 指を離した直後の「おまけのタップ」が、出てきたボタンに当たらないように
+    if (moved < 14) { E.s.x = PW / 2; E.s.y = PH / 2; E.drag = null; } // タップ：画用紙の真ん中へ
     else if (pt.inside) { E.drag = null; }
     else { E = null; sendLive(); renderUI(); return; } // 画用紙の外で放した：やめる
     renderUI(); sendLive();
   });
-  window.addEventListener('pointercancel', (e) => { if (E && E.drag === 'paldrag' && e.pointerId === E.pid) { E = null; sendLive(); renderUI(); } });
+  window.addEventListener('pointercancel', (e) => {
+    if (!(E && E.drag === 'paldrag' && e.pointerId === E.pid)) return;
+    guardUntil = now() + 450;
+    if (!E.inside) { E.s.x = PW / 2; E.s.y = PH / 2; } // ブラウザに指を取られたとき：真ん中に出す
+    E.drag = null; renderUI(); sendLive();
+  });
+  let guardUntil = 0;
+  const guarded = () => now() < guardUntil;
 
   cv.addEventListener('pointerdown', (e) => {
     Snd.init();
@@ -586,23 +598,23 @@
   // 操作中のボタン
   // 前へ／後ろへ：押した瞬間に入れかわる。重なっている図形を1つずつ追いこす（重なりがなければ端まで）
   $('ed-front').addEventListener('click', () => {
-    if (!E) return;
+    if (!E || guarded()) return;
     const R = restOf();
     let o = R.length;
     for (let j = E.o; j < R.length; j++) if (SH.overlap(R[j], E.s)) { o = j + 1; break; }
     E.o = o; Snd.play('tap'); sendLive(); renderUI();
   });
   $('ed-back').addEventListener('click', () => {
-    if (!E) return;
+    if (!E || guarded()) return;
     const R = restOf();
     let o = 0;
     for (let j = E.o - 1; j >= 0; j--) if (SH.overlap(R[j], E.s)) { o = j; break; }
     E.o = o; Snd.play('tap'); sendLive(); renderUI();
   });
   // やり直す：この手を取り消して、置く前／動かす前に戻す
-  $('ed-cancel').addEventListener('click', () => { E = null; Snd.play('tap'); sendLive(); renderUI(); });
+  $('ed-cancel').addEventListener('click', () => { if (guarded()) return; E = null; Snd.play('tap'); sendLive(); renderUI(); });
   $('ed-ok').addEventListener('click', () => {
-    if (!E || !myTurn()) return;
+    if (!E || !myTurn() || guarded()) return;
     const a = E.mode === 'place' ? { kind: 'place', pi: E.pi, o: E.o, s: { ...E.s } } : { kind: 'move', id: E.id, o: E.o, s: { ...E.s } };
     E.sent = true; E.drag = null;
     send({ t: 'live', e: null });
@@ -610,9 +622,11 @@
   });
   $('pl-finish').addEventListener('click', () => {
     if (!myTurn() || E) return;
-    if (App.mode === 'local') {
-      if (!confirm('2人とも「完成」でいいですか？ 答え合わせ（相棒のお題の当てっこ）に進みます。')) return;
-    }
+    const partner = App.mode === 'net' ? '相棒' : `${other(S.turn)} さん`;
+    const msg = S.fin ? 'あなたも完成でいいですか？ 答え合わせ（当てっこ）に進みます。'
+      : `完成を宣言しますか？
+${partner}が最後に1手だけ打てます（${partner}も「完成！」なら、そのまま答え合わせ）。`;
+    if (!confirm(msg)) return;
     Snd.play('ask');
     act({ kind: 'finish' });
   });
@@ -627,22 +641,6 @@
     if (t - liveT > 50) go(); else liveTimer = setTimeout(go, 50);
   }
 
-  // ---------- 完成の相談 ----------
-  function renderFinReq() {
-    const show = App.mode === 'net' && S.phase === 'play' && !!S.fin;
-    const ov = $('finreq');
-    const was = !ov.classList.contains('hidden');
-    ov.classList.toggle('hidden', !show);
-    if (!show) return;
-    const asker = S.fin === App.role;
-    $('fr-text').textContent = asker ? '「完成！」と伝えました。相棒が賛成したら、答え合わせに進みます。' : '相棒が「もう完成」と言っています。答え合わせに進みますか？';
-    $('fr-yes').classList.toggle('hidden', asker);
-    $('fr-no').classList.toggle('hidden', asker);
-    $('fr-wait').classList.toggle('hidden', !asker);
-    if (!was && !asker) { Snd.play('ask'); vib([40, 40, 40]); }
-  }
-  $('fr-yes').addEventListener('click', () => act({ kind: 'finAns', ok: true }));
-  $('fr-no').addEventListener('click', () => act({ kind: 'finAns', ok: false }));
 
   // ---------- 当てっこ ----------
   let pick = [];
@@ -798,14 +796,14 @@
   function toLobby(notify) {
     S = null; E = null; Live = null;
     if (notify) send({ t: 'lobby' });
-    ['guess', 'reveal', 'finreq', 'menu', 'handoff'].forEach((id) => $(id).classList.add('hidden'));
+    ['guess', 'reveal', 'menu', 'handoff'].forEach((id) => $(id).classList.add('hidden'));
     showScreen('scr-lobby');
     renderLobby();
   }
   function toTitle() {
     Link.stop();
     App.mode = null; App.role = null; S = null; E = null; Live = null;
-    ['guess', 'reveal', 'finreq', 'menu', 'handoff', 'netwait'].forEach((id) => $(id).classList.add('hidden'));
+    ['guess', 'reveal', 'menu', 'handoff', 'netwait'].forEach((id) => $(id).classList.add('hidden'));
     showScreen('scr-title');
   }
 
@@ -927,7 +925,7 @@
   }
   $('btn-join').addEventListener('click', () => { $('jn-code').value = ''; $('joinbox').classList.remove('hidden'); setTimeout(() => $('jn-code').focus(), 50); });
   $('jn-cancel').addEventListener('click', () => $('joinbox').classList.add('hidden'));
-  $('jn-code').addEventListener('input', () => { $('jn-code').value = $('jn-code').value.replace(/D/g, '').slice(0, 4); $('jn-ok').disabled = $('jn-code').value.length !== 4; });
+  $('jn-code').addEventListener('input', () => { $('jn-code').value = $('jn-code').value.replace(/\D/g, '').slice(0, 4); $('jn-ok').disabled = $('jn-code').value.length !== 4; });
   $('jn-ok').addEventListener('click', () => { const c = $('jn-code').value; if (c.length !== 4) return; $('joinbox').classList.add('hidden'); joinRoom(c); });
   $('btn-local').addEventListener('click', () => {
     Snd.init(); Snd.play('tap');
@@ -935,7 +933,7 @@
     showScreen('scr-lobby'); renderLobby();
   });
   // QR／URL から来たとき：「参加する」を出す（音や画面の設定には、1回タップが要るため）
-  const inviteCode = (params.get('join') || '').replace(/D/g, '');
+  const inviteCode = (params.get('join') || '').replace(/\D/g, '');
   if (params.has('join')) {
     try { const q = new URLSearchParams(location.search); q.delete('join'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) { /* noop */ }
     if (inviteCode.length === 4) { $('iv-code').textContent = inviteCode; $('invite').classList.remove('hidden'); }

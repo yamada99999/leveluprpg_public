@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="カタチ">
 <title>ふたりでカタチ</title>
-<link rel="stylesheet" href="style.css?v=3">
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 
@@ -56,7 +56,7 @@
     <p>話し合いは自由。<b>禁止はお題の言葉を口に出すことだけ</b>（ほぼ同じ意味の言いかえ・ジェスチャーで直接伝えるのもナシ）。「その丸、もっと上！」「それ何？」はOK。</p>
 
     <h3>🏁 完成したら、当てっこ</h3>
-    <p>手数を使い切るか、2人とも「完成！」に賛成したら答え合わせ。それぞれ、<b>相棒の半分を4択で当てます</b>。全部当たったら「以心伝心！」。手数が残っているほど評価が上がります。</p>
+    <p>手数を使い切るか、どちらかが「完成！」を宣言すると、相手に<b>最後の1手</b>が回ります（相手も「完成！」なら、そのまま答え合わせ）。それぞれ、<b>相棒の半分を4択で当てます</b>。全部当たったら「以心伝心！」。手数が残っているほど評価が上がります。</p>
     <p>最後にお題の全文と絵を見て、ふたりで笑ってください。絵は画像として保存できます。</p>
 
     <h3>📈 レベル</h3>
@@ -130,17 +130,6 @@
     </div>
   </div>
 
-  <!-- 完成の相談 -->
-  <div id="finreq" class="overlay hidden">
-    <div class="ov-card">
-      <h3>「完成！」</h3>
-      <p id="fr-text">相棒が「もう完成」と言っています。答え合わせに進みますか？</p>
-      <button id="fr-yes" class="btn big">答え合わせへ</button>
-      <button id="fr-no" class="btn ghost">まだ描く</button>
-      <p id="fr-wait" class="wait hidden">相棒の返事を待っています…</p>
-    </div>
-  </div>
-
   <!-- 当てっこ -->
   <div id="guess" class="overlay hidden">
     <div class="ov-card wide">
@@ -209,12 +198,12 @@
   </div>
 </div>
 
-<script src="config.js?v=3"></script>
-<script src="qr.js?v=3"></script>
-<script src="vendor/peerjs.min.js?v=3"></script>
-<script src="net.js?v=3"></script>
-<script src="cards.js?v=3"></script>
-<script src="shapes.js?v=3"></script>
-<script src="game.js?v=3"></script>
+<script src="config.js?v=4"></script>
+<script src="qr.js?v=4"></script>
+<script src="vendor/peerjs.min.js?v=4"></script>
+<script src="net.js?v=4"></script>
+<script src="cards.js?v=4"></script>
+<script src="shapes.js?v=4"></script>
+<script src="game.js?v=4"></script>
 </body>
 </html>

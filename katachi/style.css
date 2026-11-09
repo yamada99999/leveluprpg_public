@@ -140,7 +140,8 @@ h1 { margin: 10px 0 6px; font-size: 40px; line-height: 1.12; letter-spacing: .08
 .eb.ghost { font-size: 14px; color: var(--muted); }
 .eb.ok { flex: 1.5; font-size: 18px; color: #fff; background: var(--a); border-color: var(--a-deep); box-shadow: 0 3px 0 var(--a-deep); }
 .eb.redo { flex: 1.5; font-size: 17px; color: var(--ink); background: #fff; border: 2px solid var(--muted); box-shadow: 0 3px 0 var(--line); }
-.eb:disabled { opacity: .35; }
+.eb:disabled { opacity: 1; background: var(--bg2); border-color: var(--bg2); color: #bba88f; box-shadow: none; }
+.eb:disabled small { color: #bba88f; }
 .eb.on { background: #fff1e4; border-color: var(--a); }
 
 /* 重ねる画面 */
