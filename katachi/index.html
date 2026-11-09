@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#f3e6cf">
+<meta name="description" content="ふたりで図形を並べて、半分ずつのお題を1枚の絵にする協力ゲーム">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="カタチ">
+<title>ふたりでカタチ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- タイトル -->
+<section id="scr-title" class="screen active">
+  <div class="title-wrap">
+    <div class="logo" aria-hidden="true">
+      <span class="lg sq"></span><span class="lg tri"></span><span class="lg ci"></span><span class="lg co"></span>
+    </div>
+    <h1>ふたりで<br>カタチ</h1>
+    <p class="sub">お題は半分ずつ。図形だけで1枚の絵にして、<br>相棒の半分を当てる協力ゲーム</p>
+
+    <button id="btn-play" class="btn big">2台で遊ぶ</button>
+    <p class="sub small">2台ともこのページを開いて押すだけ。先に押した方が A、後の方が B になります。</p>
+    <button id="btn-local" class="btn">1台で交代して遊ぶ</button>
+    <button id="btn-install" class="btn ghost hidden">📲 アプリとしてホーム画面に入れる</button>
+    <button id="btn-rules" class="btn ghost">遊び方</button>
+    <button id="btn-mute" class="btn ghost small">🔊 音あり</button>
+  </div>
+</section>
+
+<!-- 遊び方 -->
+<section id="scr-rules" class="screen">
+  <h2 class="scr-h">遊び方</h2>
+  <div class="card rules">
+    <h3>🃏 お題は半分ずつ</h3>
+    <p>お題は「<b>誰が・何をした</b>」のような短い文。でも、自分に見えるのは<b>半分だけ</b>です（例：A には「ねこが」、B には「逃げ出した。」）。</p>
+    <p>2人で<b>1枚の画用紙</b>に図形を置いて、お題ぜんぶを1枚の絵にします。</p>
+
+    <h3>✋ 1手ずつ交代</h3>
+    <p>自分の番にできるのは、次のどれか1つだけ。</p>
+    <ul>
+      <li><b>図形を置く</b>：下の5つから選んで、画用紙へドラッグ（タップでも置けます）。</li>
+      <li><b>図形を動かす</b>：もう置いてある図形を1つ選んで、動かす・回す・大きさを変える。</li>
+      <li><b>選択肢を入れかえる</b>：下の5つをぜんぶ新しくする（🔄）。</li>
+    </ul>
+    <p>置く・動かすときは、角の □ で大きさ（縦横べつべつ）、上の ↻ で回転、2本指でも回転と拡大ができます。「決定」で1手おわり。相棒の操作は、動かしている途中から自分の画面にも映ります。</p>
+
+    <h3>🗣 しゃべってOK、でも…</h3>
+    <p>話し合いは自由。<b>禁止はお題の言葉を口に出すことだけ</b>（ほぼ同じ意味の言いかえ・ジェスチャーで直接伝えるのもナシ）。「その丸、もっと上！」「それ何？」はOK。</p>
+
+    <h3>🏁 完成したら、当てっこ</h3>
+    <p>手数を使い切るか、2人とも「完成！」に賛成したら答え合わせ。それぞれ、<b>相棒の半分を4択で当てます</b>。全部当たったら「以心伝心！」。手数が残っているほど評価が上がります。</p>
+    <p>最後にお題の全文と絵を見て、ふたりで笑ってください。絵は画像として保存できます。</p>
+
+    <h3>📈 レベル</h3>
+    <p>レベル1：誰が・何をした（10手）<br>レベル2：どんな・誰が・何をした（12手）<br>レベル3：どんな・誰が・誰と・何をした（14手）</p>
+
+    <h3>📱 1台で交代して遊ぶとき</h3>
+    <p>お題は「<b>長押しで見る</b>」ボタンを押している間だけ見えます。相手が見ていないときに、自分のお題をこっそり確認してください。当てっこも順番に、相手に見えないように答えます。</p>
+  </div>
+  <button id="btn-rules-back" class="btn big">もどる</button>
+</section>
+
+<!-- ロビー -->
+<section id="scr-lobby" class="screen">
+  <h2 id="lb-title" class="scr-h">ロビー</h2>
+  <div class="card">
+    <div id="lb-status" class="status"></div>
+  </div>
+  <div id="lb-net">
+    <button id="lb-share" class="btn small ghost">📤 このページのURLを送る</button>
+  </div>
+  <div id="lb-host-area">
+    <div class="lbl">レベルを選ぶ</div>
+    <div id="lb-levels" class="levels"></div>
+    <button id="lb-start" class="btn big" disabled>はじめる</button>
+  </div>
+  <p id="lb-wait" class="wait"></p>
+  <button id="lb-leave" class="btn ghost">タイトルへ</button>
+</section>
+
+<!-- プレイ -->
+<section id="scr-play" class="screen">
+  <div class="play">
+    <header class="topbar">
+      <button id="pl-menu" class="tool" aria-label="メニュー">≡</button>
+      <div id="pl-turn" class="turn"></div>
+      <button id="pl-finish" class="tool finish" aria-label="完成にする">完成！</button>
+    </header>
+    <div id="pl-odai" class="odai"></div>
+    <div id="pl-paper-wrap" class="paper-wrap">
+      <canvas id="paper" class="paper"></canvas>
+      <div id="pl-watch" class="watch hidden"></div>
+    </div>
+    <footer class="tray">
+      <div id="pl-palette" class="palette"></div>
+      <div id="pl-edit" class="editbar hidden">
+        <button id="ed-flip" class="eb" aria-label="左右反転">⇋<small>反転</small></button>
+        <button id="ed-front" class="eb" aria-label="いちばん前へ">⬆<small>前へ</small></button>
+        <button id="ed-back" class="eb" aria-label="いちばん後ろへ">⬇<small>後ろへ</small></button>
+        <button id="ed-cancel" class="eb ghost">やめる</button>
+        <button id="ed-ok" class="eb ok">決定</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <!-- 1台モード：交代 -->
+  <div id="handoff" class="overlay hidden">
+    <div class="ov-card">
+      <h3 id="ho-title"></h3>
+      <p id="ho-text"></p>
+      <button id="ho-ok" class="btn big">受け取った！</button>
+    </div>
+  </div>
+
+  <!-- 完成の相談 -->
+  <div id="finreq" class="overlay hidden">
+    <div class="ov-card">
+      <h3>「完成！」</h3>
+      <p id="fr-text">相棒が「もう完成」と言っています。答え合わせに進みますか？</p>
+      <button id="fr-yes" class="btn big">答え合わせへ</button>
+      <button id="fr-no" class="btn ghost">まだ描く</button>
+      <p id="fr-wait" class="wait hidden">相棒の返事を待っています…</p>
+    </div>
+  </div>
+
+  <!-- 当てっこ -->
+  <div id="guess" class="overlay hidden">
+    <div class="ov-card wide">
+      <h3 id="gs-title">相棒のお題を当てよう</h3>
+      <canvas id="gs-paper" class="mini"></canvas>
+      <div id="gs-qs"></div>
+      <button id="gs-ok" class="btn big" disabled>これで答える</button>
+      <p id="gs-wait" class="wait hidden">相棒が答えるのを待っています…</p>
+    </div>
+  </div>
+
+  <!-- 答え合わせ -->
+  <div id="reveal" class="overlay hidden">
+    <div class="ov-card wide">
+      <div id="rv-rank" class="rank"></div>
+      <canvas id="rv-paper" class="mini"></canvas>
+      <p id="rv-sentence" class="sentence"></p>
+      <div id="rv-list"></div>
+      <p id="rv-detail" class="detail"></p>
+      <button id="rv-save" class="btn small ghost">🖼 絵を保存</button>
+      <div id="rv-host">
+        <button id="rv-next" class="btn big">次のお題へ</button>
+        <button id="rv-lobby" class="btn ghost">レベル選択へ</button>
+      </div>
+      <p id="rv-wait" class="wait">A の人が次を選ぶのを待っています…</p>
+    </div>
+  </div>
+
+  <div id="menu" class="overlay hidden">
+    <div class="ov-card">
+      <h3>メニュー</h3>
+      <p id="mn-info" class="hint"></p>
+      <button id="mn-close" class="btn big">つづける</button>
+      <button id="mn-lobby" class="btn ghost">レベル選択へ（このお題はやめる）</button>
+      <button id="mn-title" class="btn ghost">タイトルへ（通信を終了）</button>
+    </div>
+  </div>
+
+  <div id="netwait" class="overlay hidden">
+    <div class="ov-card">
+      <h3>通信が切れました</h3>
+      <p>自動でつなぎ直しています…<br>2台とも、この画面を開いたまま待ってください。<br>絵はそのまま残っています。</p>
+      <button id="nw-title" class="btn ghost">あきらめてタイトルへ</button>
+    </div>
+  </div>
+</section>
+
+<script src="config.js"></script>
+<script src="vendor/peerjs.min.js"></script>
+<script src="net.js"></script>
+<script src="cards.js"></script>
+<script src="shapes.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

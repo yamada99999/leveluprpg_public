@@ -1544,6 +1544,20 @@
 
 
   // 開発用：コンソールから状態を見る
+  // ---------- アプリとして入れる（Android の Chrome など） ----------
+  let installEv = null;
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEv = e; $('btn-install').classList.remove('hidden'); });
+  $('btn-install').addEventListener('click', async () => {
+    if (!installEv) return;
+    installEv.prompt();
+    try { await installEv.userChoice; } catch (e) { /* noop */ }
+    installEv = null; $('btn-install').classList.add('hidden');
+  });
+  window.addEventListener('appinstalled', () => { $('btn-install').classList.add('hidden'); toast('ホーム画面に入れました'); });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* noop */ }); });
+  }
+
   if (params.get('debug') === '1') {
     window.__ura = {
       App, Input, Sensor,
