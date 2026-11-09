@@ -320,7 +320,7 @@
     init() {
       if (this.worker !== null) return;
       try {
-        this.worker = new Worker('genworker.js');
+        this.worker = new Worker('genworker.js?v=3');
         this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
         this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
       } catch (e) { this.worker = false; }
@@ -1336,10 +1336,11 @@
     return dev ? here : (CFG.publicUrl || here);
   }
 
-  const joinUrl = () => pageUrl() + '?join=1';
+  const joinUrl = () => pageUrl() + '?join=' + (Link.code || '');
   let qrFor = '';
   function renderQr(show) {
     $('lb-qr-card').classList.toggle('hidden', !show);
+    $('lb-code').textContent = Link.code || '';
     if (!show || qrFor === joinUrl()) return;
     try { window.MiniQR.draw($('lb-qr'), joinUrl(), 210); qrFor = joinUrl(); } catch (e) { $('lb-qr-card').classList.add('hidden'); }
   }
@@ -1366,11 +1367,13 @@
     if (solo) st = 'オモテとウラを並べて表示します。<br>赤い危険地帯は、その面の人にだけ見えます（両方の面で触れたらアウト）。';
     else if (open) st = '<span class="ok">● 相棒とつながりました！</span>';
     else if (Link.state === 'reconnecting') st = '<span class="ng">● 接続が切れました。自動でつなぎ直しています…</span>';
-    else if (Link.state === 'waiting') st = '● 相棒を待っています…<br><small>下の QR を相棒のスマホで読みとるか、もう1台でも「ふたりで遊ぶ」を押してね。</small>';
-    else st = '● 相棒を探しています…';
+    else if (Link.state === 'waiting') st = '● 相棒を待っています…<br><small>下の QR を相棒のスマホで読みとってね。</small>';
+    else if (Link.state === 'joining') st = `● 部屋 <b>${Link.code}</b> につないでいます…`;
+    else if (Link.state === 'notfound') st = `● 部屋 <b>${Link.code}</b> がまだ見つかりません…<br><small>相棒の画面の番号を確かめてね（このまま自動でつなぎ続けます）</small>`;
+    else st = '● 部屋を準備しています…';
     if (!solo && App.netError) st += `<br><span class="ng">${App.netError}</span>`;
     $('lb-status').innerHTML = st;
-    renderQr(!solo && !open);
+    renderQr(!solo && !open && Link.role === 'host' && !!Link.code);
 
     // センサーは「スマホが動いたとき」にだけ値が届く機種もあるので、届くまでは「確認中」にしておく（エラー扱いしない）
     let sen;
@@ -1424,6 +1427,7 @@
     renderLobby(); syncNetWait();
   });
   Link.on('lost', () => { renderLobby(); syncNetWait(); });
+  Link.on('code', () => renderLobby());
   Link.on('msg', onMsg);
   Link.on('error', (msg) => { App.netError = msg; renderLobby(); });
 
@@ -1493,9 +1497,20 @@
   $('btn-play').addEventListener('click', () => {
     prepDevice();
     App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';
-    Link.start();
+    Link.host();
     goLobby();
   });
+  // 番号で相棒の部屋に入る
+  function joinRoom(code) {
+    prepDevice();
+    App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';
+    Link.join(code);
+    goLobby();
+  }
+  $('btn-join').addEventListener('click', () => { $('jn-code').value = ''; $('jn-ok').disabled = true; $('joinbox').classList.remove('hidden'); setTimeout(() => $('jn-code').focus(), 50); });
+  $('jn-cancel').addEventListener('click', () => $('joinbox').classList.add('hidden'));
+  $('jn-code').addEventListener('input', () => { $('jn-code').value = $('jn-code').value.replace(/D/g, '').slice(0, 4); $('jn-ok').disabled = $('jn-code').value.length !== 4; });
+  $('jn-ok').addEventListener('click', () => { const c = $('jn-code').value; if (c.length !== 4) return; $('joinbox').classList.add('hidden'); joinRoom(c); });
   $('btn-solo').addEventListener('click', () => {
     prepDevice();
     Link.stop();
@@ -1503,11 +1518,12 @@
     goLobby();
   });
   // QR／URL から来たとき：「参加する」を出す（センサー・全画面・音には1回タップが要るため）
-  if (params.get('join') === '1') {
+  const inviteCode = (params.get('join') || '').replace(/D/g, '');
+  if (params.has('join')) {
     try { const q = new URLSearchParams(location.search); q.delete('join'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) { /* noop */ }
-    $('invite').classList.remove('hidden');
+    if (inviteCode.length === 4) { $('iv-code').textContent = inviteCode; $('invite').classList.remove('hidden'); }
   }
-  $('iv-join').addEventListener('click', () => { $('invite').classList.add('hidden'); $('btn-play').click(); });
+  $('iv-join').addEventListener('click', () => { $('invite').classList.add('hidden'); joinRoom(inviteCode); });
   $('iv-no').addEventListener('click', () => $('invite').classList.add('hidden'));
   $('btn-rules').addEventListener('click', () => showScreen('scr-rules'));
   $('btn-rules-back').addEventListener('click', () => showScreen('scr-title'));

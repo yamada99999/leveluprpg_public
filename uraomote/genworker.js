@@ -1,6 +1,6 @@
 'use strict';
 // 迷路づくりを裏の別スレッドで行う（重い計算でゲーム画面が固まらないように）
-importScripts('physics.js', 'gen.js');
+importScripts('physics.js?v=3', 'gen.js?v=3');
 self.onmessage = (e) => {
   const { id, level, seed } = e.data || {};
   let r = null;

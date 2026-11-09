@@ -1,115 +1,157 @@
 'use strict';
-// ウラオモテ迷宮 通信（スパークリンクと同じ PeerJS / WebRTC 方式）
+// 2台をつなぐ通信（PeerJS / WebRTC）。ウラオモテ迷宮・ふたりでカタチで共通。
 //
-// ルームコードは使わない。決まった名前（config.js の peerId）の「部屋」が世界に1つだけある。
-//   「ふたりで遊ぶ」を押すと、まずその名前で部屋を開こうとする（＝オモテ）。
-//   もう誰かが開いていたら、そこへ接続する（＝ウラ）。
-// どちらの順番で押してもよく、片方だけ先に待っていても、いつまでも待ち続ける。
-// 接続が切れても、画面を閉じない限り自動でつなぎ直す（同じ役のまま）。
+// しくみ：
+//   ・「2台で遊ぶ」を押した端末が「部屋」を作る（＝host）。部屋には4ケタの部屋番号がつく。
+//     部屋の名前は「<config の peerPrefix>-<部屋番号>」。番号は同じタブの中では使い回す
+//     （ページを開き直しても同じ番号で部屋を作り直すので、相棒は自動でつなぎ直せる）。
+//   ・相棒は QR／URL（?join=番号）か、番号の入力で、その部屋へ直接つなぐ（＝guest）。
+//     相手の名前が最初から分かっているので、待ち合わせの探し回りがなく、すぐつながる。
+//   ・接続が切れても、画面を閉じない限り自動でつなぎ直す（同じ役・同じ部屋のまま）。
+//     つなぎ直しでは、仲介サーバーへの登録（遅い）はできるだけ作り直さず、接続だけを張り直す。
 (function () {
-  const CFG = window.URA_CONFIG;
-  const ROOM = CFG.peerId;
-  const STALE_MS = 6000;    // これだけ相手から何も届かなければ、切れたとみなす
-  const GUEST_WAIT_MS = 7000;
+  const CFG = window.KATA_CONFIG || window.URA_CONFIG;
+  const PREFIX = CFG.peerPrefix;
+  const STALE_MS = 9000;     // これだけ相手から何も届かなければ、切れたとみなす
+  const CONNECT_WAIT = 6000; // つなぎに行って、これだけ返事がなければもう一度
+  const KEY = PREFIX + ':code';
+  const idOf = (code) => `${PREFIX}-${code}`;
+  const newCode = () => String(1000 + Math.floor(Math.random() * 9000));
+  const store = {
+    get() { try { return sessionStorage.getItem(KEY); } catch (e) { return null; } },
+    set(v) { try { sessionStorage.setItem(KEY, v); } catch (e) { /* noop */ } },
+  };
 
   const Link = {
     active: false,
     peer: null,
     conn: null,
-    role: null,       // 'host'（オモテ） | 'guest'（ウラ） | null（まだ決まっていない）
-    state: 'idle',    // 'idle' | 'searching' | 'waiting' | 'connected' | 'reconnecting'
+    role: null,       // 'host'（部屋を作った人） | 'guest'（部屋に入った人）
+    code: null,       // 部屋番号（4ケタの文字列）
+    everOpen: false,  // 一度でもつながったか（「つなぎ直し中」の表示に使う）
+    // 'idle' | 'searching'（部屋を準備中） | 'waiting'（相棒待ち） | 'joining'（部屋へ接続中）
+    // | 'notfound'（その番号の部屋がまだない） | 'connected' | 'reconnecting'
+    state: 'idle',
     lastRecv: 0,
-    retryTimer: 0,
-    guestTimer: 0,
+    timers: {},
+    takenTries: 0,
     handlers: {},
     on(ev, fn) { this.handlers[ev] = fn; },
     emit(ev, arg) { const f = this.handlers[ev]; if (f) f(arg); },
     setState(s) { if (this.state !== s) { this.state = s; this.emit('state', s); } },
     get open() { return !!(this.conn && this.conn.open); },
+    later(name, fn, ms) {
+      clearTimeout(this.timers[name]);
+      this.timers[name] = setTimeout(() => { if (this.active) fn(); }, ms);
+    },
+    clearTimers() { for (const k in this.timers) clearTimeout(this.timers[k]); this.timers = {}; },
 
-    start() {
+    // 部屋を作る（番号は同じタブなら使い回す）
+    host() {
+      this.begin('host');
+      this.code = store.get() || newCode();
+      store.set(this.code);
+      this.takenTries = 0;
+      this.setState('searching');
+      this.openRoom();
+    },
+    // 番号の部屋に入る
+    join(code) {
+      this.begin('guest');
+      this.code = String(code).replace(/\D/g, '').slice(0, 4);
+      this.setState('joining');
+      this.openGuest();
+    },
+    start() { this.host(); }, // 古い呼び方
+    begin(role) {
       this.stop();
       if (typeof window.Peer !== 'function') { this.emit('error', '通信ライブラリを読み込めませんでした'); return; }
       this.active = true;
-      this.role = null;
-      this.setState('searching');
-      this.pair();
+      this.role = role;
+      this.everOpen = false;
     },
 
     stop() {
       this.active = false;
-      clearTimeout(this.retryTimer); clearTimeout(this.guestTimer);
+      this.clearTimers();
       const c = this.conn, p = this.peer;
       this.conn = null; this.peer = null;
       if (c) { try { c.close(); } catch (e) { /* noop */ } }
       if (p) { try { p.destroy(); } catch (e) { /* noop */ } }
       this.setState('idle');
     },
-
-    later(fn, ms) {
-      clearTimeout(this.retryTimer);
-      this.retryTimer = setTimeout(() => { if (this.active) fn(); }, ms);
-    },
-
     dropPeer() {
-      clearTimeout(this.guestTimer);
       const p = this.peer;
       this.peer = null;
       if (p) { try { p.destroy(); } catch (e) { /* noop */ } }
     },
 
-    // 前回の役を優先してつなぐ。役が未定なら、まず部屋を開いてみる
-    pair() {
+    // ---- host ----
+    openRoom() {
       if (!this.active) return;
-      if (this.role === 'guest') this.tryGuest(); else this.tryHost();
-    },
-
-    tryHost() {
       this.dropPeer();
-      const p = new window.Peer(ROOM, CFG.peerOptions);
+      const p = new window.Peer(idOf(this.code), CFG.peerOptions);
       this.peer = p;
       p.on('open', () => {
         if (this.peer !== p) return;
-        this.role = 'host';
-        if (!this.open) this.setState(this.state === 'reconnecting' ? 'reconnecting' : 'waiting');
+        this.takenTries = 0;
+        if (!this.open) this.setState(this.everOpen ? 'reconnecting' : 'waiting');
+        this.emit('code', this.code);
       });
       p.on('connection', (c) => {
         if (this.peer !== p) { try { c.close(); } catch (e) { /* noop */ } return; }
         this.bind(c); // 新しい接続を優先（つなぎ直してきた相棒を受け入れる）
       });
       p.on('disconnected', () => {
-        // 仲介サーバーとの接続だけが切れた。相棒との直通は生きているので、登録し直す
-        setTimeout(() => { if (this.peer === p && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { /* noop */ } } }, 1000);
+        // 仲介サーバーとの接続だけが切れた（相棒との直通は生きている）。登録し直す
+        this.later('rereg', () => { if (this.peer === p && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { this.openRoom(); } } }, 800);
       });
       p.on('error', (e) => {
         if (this.peer !== p) return;
         console.warn('peer error (host)', e.type);
         if (e.type === 'unavailable-id') {
-          // もう部屋がある → そこへ参加する。
-          // （前回オモテだった場合は、自分の古い登録が残っているだけかもしれないので、少し待ってまた開き直す）
-          this.later(() => this.tryGuest(), 300);
+          // 開き直した直後で、前の自分の登録がまだ残っていることがある。少し待って同じ番号で。
+          // それでもだめなら（ほかの誰かが使っている）新しい番号にする
+          this.takenTries++;
+          if (this.takenTries > 4 && !this.everOpen) { this.code = newCode(); store.set(this.code); this.takenTries = 0; }
+          this.later('room', () => this.openRoom(), 1500);
           return;
         }
-        this.later(() => this.pair(), 3000);
+        this.later('room', () => this.openRoom(), 2000);
       });
     },
 
-    tryGuest() {
+    // ---- guest ----
+    openGuest() {
+      if (!this.active) return;
       this.dropPeer();
       const p = new window.Peer(CFG.peerOptions);
       this.peer = p;
-      const retry = () => this.later(() => (this.role === 'guest' ? this.tryGuest() : this.tryHost()), 1500);
-      p.on('open', () => {
-        if (this.peer !== p) return;
-        const c = p.connect(ROOM, { serialization: 'json', reliable: true });
-        this.bind(c);
-        this.guestTimer = setTimeout(() => { if (this.peer === p && !this.open) retry(); }, GUEST_WAIT_MS);
+      p.on('open', () => { if (this.peer === p) this.dial(); });
+      p.on('disconnected', () => {
+        this.later('rereg', () => { if (this.peer === p && !p.destroyed && p.disconnected) { try { p.reconnect(); } catch (e) { this.openGuest(); } } }, 800);
       });
       p.on('error', (e) => {
         if (this.peer !== p) return;
         console.warn('peer error (guest)', e.type);
-        retry();
+        if (e.type === 'peer-unavailable') {
+          // その番号の部屋がない（まだ作られていない／作り直し中）。登録はそのままで、少し待ってもう一度
+          if (!this.open) this.setState(this.everOpen ? 'reconnecting' : 'notfound');
+          this.later('dial', () => this.dial(), 2000);
+          return;
+        }
+        if (p.destroyed || ['network', 'server-error', 'socket-error', 'socket-closed', 'browser-incompatible'].includes(e.type)) this.later('guest', () => this.openGuest(), 2000);
       });
+    },
+    // 部屋へ接続しに行く（登録は使い回す）
+    dial() {
+      const p = this.peer;
+      if (!this.active || this.open || !p || p.destroyed) return;
+      if (p.disconnected) { try { p.reconnect(); } catch (e) { this.openGuest(); } return; }
+      if (!this.everOpen && this.state !== 'notfound') this.setState('joining');
+      const c = p.connect(idOf(this.code), { serialization: 'json', reliable: true });
+      this.bind(c);
+      this.later('dial', () => { if (!this.open) this.dial(); }, CONNECT_WAIT);
     },
 
     bind(c) {
@@ -118,10 +160,9 @@
         const old = this.conn;
         this.conn = c;
         if (old && old !== c) { try { old.close(); } catch (e) { /* noop */ } }
-        clearTimeout(this.guestTimer);
-        clearTimeout(this.retryTimer);
-        this.role = this.peer && this.peer.id === ROOM ? 'host' : 'guest';
+        clearTimeout(this.timers.dial);
         this.lastRecv = Date.now();
+        this.everOpen = true;
         this.setState('connected');
         this.emit('open', this.role);
       });
@@ -135,7 +176,7 @@
       c.on('error', gone);
     },
 
-    // 相棒との直通が切れた：役はそのままで、つなぎ直す
+    // 相棒との直通が切れた：役・部屋はそのままで、つなぎ直す
     lost() {
       const c = this.conn;
       this.conn = null;
@@ -144,30 +185,33 @@
       this.setState('reconnecting');
       this.emit('lost');
       if (this.role === 'host') {
-        // 部屋はそのまま開けておく。部屋そのものが壊れていたら開き直す
-        const p = this.peer;
-        if (!p || p.destroyed) this.later(() => this.tryHost(), 500);
-        else if (p.disconnected) { try { p.reconnect(); } catch (e) { this.later(() => this.tryHost(), 500); } }
+        const p = this.peer; // 部屋は開けたまま待つ。部屋そのものが壊れていたら開き直す
+        if (!p || p.destroyed) this.later('room', () => this.openRoom(), 300);
+        else if (p.disconnected) { try { p.reconnect(); } catch (e) { this.later('room', () => this.openRoom(), 300); } }
       } else {
-        this.later(() => this.tryGuest(), 800);
+        this.later('dial', () => this.dial(), 300);
       }
     },
 
-    // 定期チェック：無言が続いたら切れたとみなす／待機中に部屋が壊れていたら作り直す
+    // 定期チェック：無言が続いたら切れたとみなす／壊れた登録を作り直す
     watch() {
       if (!this.active) return;
       if (this.open && Date.now() - this.lastRecv > STALE_MS) { this.lost(); return; }
-      if (!this.open && this.role === 'host' && this.peer && this.peer.destroyed) this.later(() => this.tryHost(), 500);
+      if (!this.open && this.peer && this.peer.destroyed) {
+        if (this.role === 'host') this.later('room', () => this.openRoom(), 300);
+        else this.later('guest', () => this.openGuest(), 300);
+      }
     },
 
-    // 画面に戻ってきたとき（LINEなどから戻った）、つながっていなければすぐ探し直す
+    // 画面に戻ってきたとき（LINE やカメラから戻った）、つながっていなければすぐ確かめる
     wake() {
-      if (!this.active || this.open) return;
-      if (this.role === 'host' && this.peer && !this.peer.destroyed) {
-        if (this.peer.disconnected) { try { this.peer.reconnect(); } catch (e) { this.tryHost(); } }
-        return;
-      }
-      this.later(() => this.pair(), 100);
+      if (!this.active) return;
+      this.lastRecv = Math.max(this.lastRecv, Date.now() - 3000); // 戻った瞬間に「切れた」と決めつけない
+      if (this.open) return;
+      const p = this.peer;
+      if (!p || p.destroyed) { if (this.role === 'host') this.openRoom(); else this.openGuest(); return; }
+      if (p.disconnected) { try { p.reconnect(); } catch (e) { /* noop */ } }
+      if (this.role === 'guest') this.later('dial', () => this.dial(), 200);
     },
 
     send(m) {

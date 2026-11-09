@@ -3,7 +3,7 @@
 window.KATA_CONFIG = {
   // このゲームの公開ページ（「このページのURLを送る」ボタンで使う）
   publicUrl: 'https://yamada99999.github.io/leveluprpg_public/katachi/',
-  // 2台が待ち合わせる「部屋」の名前（PeerJS 上で世界に1つ）。先に来た人が A、後から来た人が B。
-  peerId: 'katachi-v1-yamada99999-room',
+  // 部屋の名前の頭（PeerJS 上の名前は「これ-4ケタの部屋番号」）。部屋を作った人が A、入った人が B。
+  peerPrefix: 'katachi-v2-yamada99999',
   peerOptions: { debug: 1 },
 };
