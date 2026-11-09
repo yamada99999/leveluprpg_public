@@ -379,7 +379,7 @@
     init() {
       if (this.worker !== null) return;
       try {
-        this.worker = new Worker('genworker.js?v=5');
+        this.worker = new Worker('genworker.js?v=6');
         this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
         this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
       } catch (e) { this.worker = false; }
@@ -1599,10 +1599,30 @@
   $('sd-enable').addEventListener('click', () => { Sensor.enable().then(() => renderDiag()); renderDiag(); });
   $('sd-close').addEventListener('click', () => { $('sensorbox').classList.add('hidden'); if ($('scr-lobby').classList.contains('active')) renderLobby(); });
   // Chrome で開き直す（LINE やカメラの中のブラウザから抜け出す）
-  $('sd-chrome').addEventListener('click', () => {
+  // 開き直すときは、参加しようとしていた部屋番号も渡す（QR から来て、まだ参加していない／参加中）
+  function openInChrome() {
     const u = new URL(location.href);
+    const code = Link.role === 'guest' && Link.code ? Link.code : (!$('invite').classList.contains('hidden') ? inviteCode : '');
+    if (code) u.searchParams.set('join', code);
     location.href = 'intent://' + u.host + u.pathname + u.search + '#Intent;scheme=https;package=com.android.chrome;S.browser_fallback_url=' + encodeURIComponent(u.href) + ';end';
-  });
+  }
+  $('sd-chrome').addEventListener('click', openInChrome);
+
+  // ---------- Chrome 以外で開いたときの案内 ----------
+  // Xiaomi のブラウザ・カメラの中のブラウザなどは、傾きセンサーの値をページに渡さないことがある。
+  // Android で Chrome 以外と分かったら、上に「Chrome で開く」の案内を出す（センサーの値が届いたら消す）
+  const UA = navigator.userAgent;
+  const NOT_CHROME = IS_ANDROID && (!/Chrome\//.test(UA) || IN_APP ||
+    /EdgA|OPR\/|OPT\/|SamsungBrowser|MiuiBrowser|XiaoMi|HeyTapBrowser|OppoBrowser|VivoBrowser|UCBrowser|YaBrowser|Firefox|DuckDuckGo|Version\/\d/i.test(UA));
+  let barClosed = false;
+  function syncChromeBar() {
+    const onTitleOrLobby = $('scr-title').classList.contains('active') || $('scr-lobby').classList.contains('active');
+    const show = NOT_CHROME && !barClosed && !Sensor.fresh() && onTitleOrLobby && now() - pageT > 1200;
+    $('chromebar').classList.toggle('hidden', !show);
+  }
+  $('cb-open').addEventListener('click', openInChrome);
+  $('cb-close').addEventListener('click', () => { barClosed = true; syncChromeBar(); });
+  setInterval(syncChromeBar, 500);
   $('btn-play').addEventListener('click', () => {
     prepDevice();
     App.mode = 'net'; App.mySides = []; App.stageSel = 0; App.netError = '';

@@ -11,11 +11,18 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <title>ウラオモテ迷宮</title>
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 
 <!-- タイトル -->
+<!-- Chrome 以外のブラウザで開いたときの案内 -->
+<div id="chromebar" class="chromebar hidden" role="alert">
+  <div class="cb-text"><b>⚠ Chrome 以外のブラウザで開いています</b><br>このままだと傾きセンサーが動かないことがあります。</div>
+  <button id="cb-open" class="cb-open">Chrome で開く</button>
+  <button id="cb-close" class="cb-close" aria-label="閉じる">×</button>
+</div>
+
 <section id="scr-title" class="screen active">
   <div class="title-wrap">
     <div class="logo" aria-hidden="true">
@@ -239,13 +246,13 @@
   </div>
 </div>
 
-<script src="config.js?v=5"></script>
-<script src="qr.js?v=5"></script>
-<script src="vendor/peerjs.min.js?v=5"></script>
-<script src="net.js?v=5"></script>
-<script src="levels.js?v=5"></script>
-<script src="physics.js?v=5"></script>
-<script src="gen.js?v=5"></script>
-<script src="game.js?v=5"></script>
+<script src="config.js?v=6"></script>
+<script src="qr.js?v=6"></script>
+<script src="vendor/peerjs.min.js?v=6"></script>
+<script src="net.js?v=6"></script>
+<script src="levels.js?v=6"></script>
+<script src="physics.js?v=6"></script>
+<script src="gen.js?v=6"></script>
+<script src="game.js?v=6"></script>
 </body>
 </html>

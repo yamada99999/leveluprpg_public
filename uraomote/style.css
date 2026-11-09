@@ -240,3 +240,9 @@ html.fs { --top-min: 30px; --bottom-min: 12px; } /* 全画面表示中は、シ�
 .sd-help ol { padding-left: 18px; margin: 6px 0; }
 .sd-help li { margin: 4px 0; line-height: 1.55; }
 .sd-note { font-size: 12px !important; color: var(--muted); line-height: 1.5; }
+
+/* Chrome 以外で開いたときの案内 */
+.chromebar { position: fixed; left: 8px; right: 8px; top: max(8px, env(safe-area-inset-top)); z-index: 40; display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 12px; border-radius: 14px; background: #3a1d24; border: 1.5px solid var(--trap); box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+.cb-text { flex: 1; font-size: 12.5px; line-height: 1.45; color: var(--text); }
+.cb-open { flex: none; font: inherit; font-size: 14px; font-weight: 800; padding: 9px 12px; border-radius: 10px; border: none; color: #1b1300; background: var(--a); }
+.cb-close { flex: none; width: 32px; height: 32px; font: inherit; font-size: 18px; border-radius: 8px; border: none; background: transparent; color: var(--muted); }
