@@ -522,16 +522,21 @@
     if (ptrs.size === 2 && E) { startPinch(); return; }
     if (ptrs.size > 1) return;
     if (E) {
+      // 編集中：取っ手（↻・□）をちゃんと押したときだけ回転・大きさ。それ以外は、画用紙のどこをなぞっても図形を動かす
+      // （小さい図形は取っ手と重なるので、図形の上では取っ手の真ん近くを押したときだけ取っ手にする）
       const h = handles(E.s, E.hc);
-      if (near(pt, h.rot, 24)) { E.drag = 'rot'; return; }
-      if (near(pt, h.scale, 24)) {
+      const onShape = SH.hit(E.s, pt.x, pt.y, 0);
+      const lim = onShape ? 12 : 24;
+      const dRot = Math.hypot(pt.x - h.rot[0], pt.y - h.rot[1]), dSc = Math.hypot(pt.x - h.scale[0], pt.y - h.scale[1]);
+      if (dRot <= lim && dRot <= dSc) { E.drag = 'rot'; return; }
+      if (dSc <= lim) {
         // つかんだ角の向きを覚える（反対側まで引っぱったら裏返す）
         const c = Math.cos(-E.s.r), n = Math.sin(-E.s.r), dx = h.scale[0] - E.s.x, dy = h.scale[1] - E.s.y;
         E.drag = 'scale';
         E.sk = { kx: sgn(dx * c - dy * n), ky: sgn(dx * n + dy * c), gx: sgn(E.s.sx), gy: sgn(E.s.sy) };
         return;
       }
-      if (SH.hit(E.s, pt.x, pt.y, 16) || inBox(E.s, pt, 6)) { E.drag = 'move'; E.ox = pt.x - E.s.x; E.oy = pt.y - E.s.y; return; }
+      E.drag = 'move'; E.ox = pt.x - E.s.x; E.oy = pt.y - E.s.y; // 指の動いた分だけ動かす（図形の外をなぞってもOK）
       return;
     }
     // 置いてある図形をつかむ（いちばん上のもの）
