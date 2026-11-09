@@ -27,7 +27,7 @@
     <p class="sub">スマホを背中合わせにして、2人で傾ける協力迷路</p>
 
     <button id="btn-play" class="btn big">ふたりで遊ぶ</button>
-    <p class="sub small">2台ともこのページを開いて押すだけ。先に押した方がオモテ、後の方がウラになります。</p>
+    <p class="sub small">押すと QR コードが出ます。相棒のスマホで読みとれば、すぐつながります（先に押した方がオモテ）。</p>
     <button id="btn-solo" class="btn ghost">ひとりで試す（両面を並べて表示）</button>
     <button id="btn-install" class="btn ghost hidden">📲 アプリとしてホーム画面に入れる</button>
     <button id="btn-rules" class="btn ghost">遊び方</button>
@@ -40,7 +40,7 @@
   <h2 class="scr-h">遊び方</h2>
   <div class="card rules">
     <h3>📱 準備</h3>
-    <p>2台ともこのページを開いて「<b>ふたりで遊ぶ</b>」を押します（押す順番もタイミングも自由）。つながったら、<b>2台のスマホを縦にして背面同士をぴったり合わせ</b>、2人で向かい合って一緒に持ちます。</p>
+    <p>1台目で「<b>ふたりで遊ぶ</b>」を押すと QR コードが出ます。2台目のカメラで読みとって「参加する」を押せばつながります（2台とも「ふたりで遊ぶ」を押しても OK）。つながったら、<b>2台のスマホを縦にして背面同士をぴったり合わせ</b>、2人で向かい合って一緒に持ちます。</p>
     <p class="note">⚠ スマホの<b>画面の自動回転はオフ</b>にしておいてください。</p>
     <p>途中で通信が切れても、画面を開いたままなら自動でつなぎ直して、チェックポイントから再開します。</p>
 
@@ -87,7 +87,12 @@
     <div id="lb-sensor" class="status"></div>
   </div>
   <div id="lb-net">
-    <button id="lb-share" class="btn small ghost">📤 このページのURLを送る</button>
+    <div id="lb-qr-card" class="card center qr-card hidden">
+      <p class="qr-h">相棒のスマホのカメラで読みとってね</p>
+      <canvas id="lb-qr" aria-label="参加用のQRコード"></canvas>
+      <p class="qr-note">開いたページで「参加する」を押すだけで、この端末とつながります。</p>
+    </div>
+    <button id="lb-share" class="btn small ghost">📤 URLで送る（LINE など）</button>
   </div>
 
   <div class="card hold">
@@ -184,7 +189,18 @@
   </div>
 </section>
 
+<!-- QR／URL から来たとき -->
+<div id="invite" class="overlay hidden">
+  <div class="ov-card">
+    <h3>🤝 相棒から呼ばれています</h3>
+    <p>「参加する」を押すと、QR を見せている相棒の端末とつながります。</p>
+    <button id="iv-join" class="btn big">参加する</button>
+    <button id="iv-no" class="btn ghost">あとで</button>
+  </div>
+</div>
+
 <script src="config.js"></script>
+<script src="qr.js"></script>
 <script src="vendor/peerjs.min.js"></script>
 <script src="net.js"></script>
 <script src="levels.js"></script>

@@ -25,7 +25,7 @@
     <p class="sub">お題は半分ずつ。図形だけで1枚の絵にして、<br>相棒の半分を当てる協力ゲーム</p>
 
     <button id="btn-play" class="btn big">2台で遊ぶ</button>
-    <p class="sub small">2台ともこのページを開いて押すだけ。先に押した方が A、後の方が B になります。</p>
+    <p class="sub small">押すと QR コードが出ます。相棒のスマホで読みとれば、すぐつながります（先に押した方が A）。</p>
     <button id="btn-local" class="btn">1台で交代して遊ぶ</button>
     <button id="btn-install" class="btn ghost hidden">📲 アプリとしてホーム画面に入れる</button>
     <button id="btn-rules" class="btn ghost">遊び方</button>
@@ -39,6 +39,7 @@
   <div class="card rules">
     <h3>🃏 お題は半分ずつ</h3>
     <p>お題は「<b>誰が・何をした</b>」のような短い文。でも、自分に見えるのは<b>半分だけ</b>です（例：A には「ねこが」、B には「逃げ出した。」）。</p>
+    <p>部品が3つ以上のときは、1つだけ<b>ふたり共通</b>で見えます（緑の枠）。ここを足がかりにしてください。</p>
     <p>2人で<b>1枚の画用紙</b>に図形を置いて、お題ぜんぶを1枚の絵にします。</p>
 
     <h3>✋ 1手ずつ交代</h3>
@@ -48,7 +49,7 @@
       <li><b>図形を動かす</b>：もう置いてある図形を1つ選んで、動かす・回す・大きさを変える。</li>
       <li><b>選択肢を入れかえる</b>：下の5つをぜんぶ新しくする（🔄）。</li>
     </ul>
-    <p>置く・動かすときは、角の □ で大きさ（縦横べつべつ）、上の ↻ で回転、2本指でも回転と拡大ができます。「決定」で1手おわり。相棒の操作は、動かしている途中から自分の画面にも映ります。</p>
+    <p>置く・動かすときは、角の □ で大きさ（縦横べつべつ。反対側まで引っぱると裏返る）、上の ↻ で回転、2本指でも回転と拡大ができます。新しい図形はいちばん前に重なります。「前へ」「後ろへ」で重なり順をその場で変えられます。「やり直す」でその手を取り消し、「決定」で1手おわり。相棒の操作は、動かしている途中から自分の画面にも映ります。</p>
 
     <h3>🗣 しゃべってOK、でも…</h3>
     <p>話し合いは自由。<b>禁止はお題の言葉を口に出すことだけ</b>（ほぼ同じ意味の言いかえ・ジェスチャーで直接伝えるのもナシ）。「その丸、もっと上！」「それ何？」はOK。</p>
@@ -58,7 +59,10 @@
     <p>最後にお題の全文と絵を見て、ふたりで笑ってください。絵は画像として保存できます。</p>
 
     <h3>📈 レベル</h3>
-    <p>レベル1：誰が・何をした（10手）<br>レベル2：どんな・誰が・何をした（12手）<br>レベル3：どんな・誰が・誰と・何をした（14手）</p>
+    <p>レベル1：誰が・何をした（10手）<br>レベル2：どんな・誰が・何をした（12手）<br>レベル3：どんな・誰が・誰と・何をした（14手）<br>レベル4：どんな・誰が・どこで・誰と・何をした（16手）<br>レベル5：いつ・どんな・誰が・どこで・誰と・何をした（18手）</p>
+
+    <h3>📷 2台のつなぎ方</h3>
+    <p>1台目で「2台で遊ぶ」を押すと QR コードが出ます。2台目のカメラで読みとって「参加する」を押すだけ。URL を LINE などで送ることもできます。</p>
 
     <h3>📱 1台で交代して遊ぶとき</h3>
     <p>お題は「<b>長押しで見る</b>」ボタンを押している間だけ見えます。相手が見ていないときに、自分のお題をこっそり確認してください。当てっこも順番に、相手に見えないように答えます。</p>
@@ -73,7 +77,12 @@
     <div id="lb-status" class="status"></div>
   </div>
   <div id="lb-net">
-    <button id="lb-share" class="btn small ghost">📤 このページのURLを送る</button>
+    <div id="lb-qr-card" class="card qr-card hidden">
+      <p class="qr-h">相棒のスマホのカメラで読みとってね</p>
+      <canvas id="lb-qr" aria-label="参加用のQRコード"></canvas>
+      <p class="hint">開いたページで「参加する」を押すだけで、この端末とつながります。</p>
+    </div>
+    <button id="lb-share" class="btn small ghost">📤 URLで送る（LINE など）</button>
   </div>
   <div id="lb-host-area">
     <div class="lbl">レベルを選ぶ</div>
@@ -100,10 +109,9 @@
     <footer class="tray">
       <div id="pl-palette" class="palette"></div>
       <div id="pl-edit" class="editbar hidden">
-        <button id="ed-flip" class="eb" aria-label="左右反転">⇋<small>反転</small></button>
-        <button id="ed-front" class="eb" aria-label="いちばん前へ">⬆<small>前へ</small></button>
-        <button id="ed-back" class="eb" aria-label="いちばん後ろへ">⬇<small>後ろへ</small></button>
-        <button id="ed-cancel" class="eb ghost">やめる</button>
+        <button id="ed-front" class="eb" aria-label="前へ">⬆<small>前へ</small></button>
+        <button id="ed-back" class="eb" aria-label="後ろへ">⬇<small>後ろへ</small></button>
+        <button id="ed-cancel" class="eb redo">やり直す</button>
         <button id="ed-ok" class="eb ok">決定</button>
       </div>
     </footer>
@@ -178,7 +186,18 @@
   </div>
 </section>
 
+<!-- QR／URL から来たとき -->
+<div id="invite" class="overlay hidden">
+  <div class="ov-card">
+    <h3>🤝 相棒から呼ばれています</h3>
+    <p>「参加する」を押すと、QR を見せている相棒の端末とつながります。</p>
+    <button id="iv-join" class="btn big">参加する</button>
+    <button id="iv-no" class="btn ghost">あとで</button>
+  </div>
+</div>
+
 <script src="config.js"></script>
+<script src="qr.js"></script>
 <script src="vendor/peerjs.min.js"></script>
 <script src="net.js"></script>
 <script src="cards.js"></script>

@@ -1336,6 +1336,14 @@
     return dev ? here : (CFG.publicUrl || here);
   }
 
+  const joinUrl = () => pageUrl() + '?join=1';
+  let qrFor = '';
+  function renderQr(show) {
+    $('lb-qr-card').classList.toggle('hidden', !show);
+    if (!show || qrFor === joinUrl()) return;
+    try { window.MiniQR.draw($('lb-qr'), joinUrl(), 210); qrFor = joinUrl(); } catch (e) { $('lb-qr-card').classList.add('hidden'); }
+  }
+
   function goLobby() {
     G = null;
     App.views = [];
@@ -1358,10 +1366,11 @@
     if (solo) st = 'オモテとウラを並べて表示します。<br>赤い危険地帯は、その面の人にだけ見えます（両方の面で触れたらアウト）。';
     else if (open) st = '<span class="ok">● 相棒とつながりました！</span>';
     else if (Link.state === 'reconnecting') st = '<span class="ng">● 接続が切れました。自動でつなぎ直しています…</span>';
-    else if (Link.state === 'waiting') st = '● 相棒を待っています…<br><small>もう1台でもこのページを開いて「ふたりで遊ぶ」を押してね。ゆっくりで大丈夫です。</small>';
+    else if (Link.state === 'waiting') st = '● 相棒を待っています…<br><small>下の QR を相棒のスマホで読みとるか、もう1台でも「ふたりで遊ぶ」を押してね。</small>';
     else st = '● 相棒を探しています…';
     if (!solo && App.netError) st += `<br><span class="ng">${App.netError}</span>`;
     $('lb-status').innerHTML = st;
+    renderQr(!solo && !open);
 
     // センサーは「スマホが動いたとき」にだけ値が届く機種もあるので、届くまでは「確認中」にしておく（エラー扱いしない）
     let sen;
@@ -1493,6 +1502,13 @@
     App.mode = 'solo'; App.mySides = ['A', 'B'];
     goLobby();
   });
+  // QR／URL から来たとき：「参加する」を出す（センサー・全画面・音には1回タップが要るため）
+  if (params.get('join') === '1') {
+    try { const q = new URLSearchParams(location.search); q.delete('join'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) { /* noop */ }
+    $('invite').classList.remove('hidden');
+  }
+  $('iv-join').addEventListener('click', () => { $('invite').classList.add('hidden'); $('btn-play').click(); });
+  $('iv-no').addEventListener('click', () => $('invite').classList.add('hidden'));
   $('btn-rules').addEventListener('click', () => showScreen('scr-rules'));
   $('btn-rules-back').addEventListener('click', () => showScreen('scr-title'));
 
@@ -1504,9 +1520,9 @@
   $('lb-start').addEventListener('click', () => { Snd.init(); leaderTutorial(App.stageSel); });
   $('lb-run').addEventListener('click', () => { Snd.init(); leaderStartRun(); });
   $('lb-share').addEventListener('click', async () => {
-    const url = pageUrl();
+    const url = joinUrl();
     if (navigator.share) { try { await navigator.share({ title: 'ウラオモテ迷宮', text: 'ウラオモテ迷宮で遊ぼう！', url }); } catch (e) { /* キャンセル */ } }
-    else { try { await navigator.clipboard.writeText(url); $('lb-share').textContent = 'URLをコピーしました'; setTimeout(() => { $('lb-share').textContent = '📤 このページのURLを送る'; }, 1500); } catch (e) { /* noop */ } }
+    else { try { await navigator.clipboard.writeText(url); $('lb-share').textContent = 'URLをコピーしました'; setTimeout(() => { $('lb-share').textContent = '📤 URLで送る（LINE など）'; }, 1500); } catch (e) { /* noop */ } }
   });
   const toTitle = () => {
     if (App.mode !== 'solo' && Link.active && !confirm('通信を終了してタイトルに戻りますか？')) return;

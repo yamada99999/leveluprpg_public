@@ -104,6 +104,13 @@ h1 { margin: 10px 0 6px; font-size: 40px; line-height: 1.12; letter-spacing: .08
 .od .l { font-size: 11px; color: var(--muted); }
 .od .t { font-size: 15px; font-weight: 800; line-height: 1.3; word-break: keep-all; overflow-wrap: anywhere; }
 .od.mine { border: 2.5px solid var(--ng); background: #fff; }
+.od.both { border: 2.5px solid var(--ok); background: #f3fbef; }
+.od.both .l { color: #3a7a38; }
+.od.long .t { font-size: 12.5px; line-height: 1.35; }
+.res .mk.both { font-size: 18px; }
+.qr-card { text-align: center; }
+.qr-card canvas { display: block; margin: 4px auto 6px; border-radius: 6px; image-rendering: pixelated; }
+.qr-h { font-size: 15px; font-weight: 800; margin: 2px 0 4px; }
 .od.hid .t { color: #c4b19a; letter-spacing: .1em; }
 .peek { grid-column: 1 / -1; display: flex; gap: 6px; }
 .peek button { flex: 1; font: inherit; font-size: 13px; font-weight: 800; padding: 9px 4px; border-radius: 10px; border: 1.5px solid var(--line); background: var(--card); color: var(--ink); }
@@ -132,6 +139,7 @@ h1 { margin: 10px 0 6px; font-size: 40px; line-height: 1.12; letter-spacing: .08
 .eb small { display: block; font-size: 10.5px; font-weight: 700; color: var(--muted); }
 .eb.ghost { font-size: 14px; color: var(--muted); }
 .eb.ok { flex: 1.5; font-size: 18px; color: #fff; background: var(--a); border-color: var(--a-deep); box-shadow: 0 3px 0 var(--a-deep); }
+.eb.redo { flex: 1.5; font-size: 17px; color: var(--ink); background: #fff; border: 2px solid var(--muted); box-shadow: 0 3px 0 var(--line); }
 .eb:disabled { opacity: .35; }
 .eb.on { background: #fff1e4; border-color: var(--a); }
 

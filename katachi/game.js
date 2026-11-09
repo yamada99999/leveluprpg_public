@@ -102,9 +102,12 @@
       parts.push({ slot, text, owner: null });
     }
     if (whoText) { const w = parts.find((p) => p.slot === 'with'); if (w && w.text === whoText) w.text = pickDistinct(C.SLOTS.with.deck, 1, [whoText])[0]; }
-    // 部品を A・B にほぼ半分ずつ配る（どちらも1つ以上）
-    const owners = shuffle(parts.map((_, i) => (i % 2 ? 'B' : 'A')));
-    parts.forEach((p, i) => { p.owner = owners[i]; });
+    // 部品が3つ以上なら、1つを「ふたり共通」にする。残りを A・B にほぼ半分ずつ配る（どちらも1つ以上）
+    const shared = parts.length >= 3 ? Math.floor(Math.random() * parts.length) : -1;
+    const rest = shuffle(parts.map((_, i) => i).filter((i) => i !== shared));
+    const flip = Math.random() < 0.5; // 数が奇数のとき、多く持つ人もランダムに
+    rest.forEach((pi, j) => { parts[pi].owner = (j % 2 === 0) !== flip ? 'A' : 'B'; });
+    if (shared >= 0) parts[shared].owner = 'both';
     const first = round % 2 ? 'A' : 'B';
     return {
       v: 0, phase: 'play', level, round,
@@ -129,9 +132,11 @@
     S.phase = 'guess'; S.fin = null;
     // A は B の部品を、B は A の部品を当てる
     const quiz = { A: [], B: [] };
+    const texts = S.parts.map((p) => p.text);
     for (const p of S.parts) {
+      if (p.owner === 'both') continue; // 共通のお題は当てっこなし
       const deck = C.SLOTS[p.slot].deck;
-      const wrong = pickDistinct(deck, 3, [p.text]);
+      const wrong = pickDistinct(deck, 3, texts);
       const opts = shuffle([p.text, ...wrong]);
       quiz[other(p.owner)].push({ slot: p.slot, opts, ans: opts.indexOf(p.text) });
     }
@@ -146,7 +151,7 @@
         const p = S.palette[a.pi];
         if (!p || p.k !== a.s.k) return;
         const sh = { id: S.nextId++, k: p.k, c: p.c, ...tf(a.s) };
-        if (a.z === -1) S.shapes.unshift(sh); else S.shapes.push(sh);
+        S.shapes.splice(clamp(a.o == null ? S.shapes.length : a.o | 0, 0, S.shapes.length), 0, sh); // o：重なり順（大きいほど前）
         replaceOne(S.palette, a.pi);
         S.last = { by, kind: 'place', id: sh.id };
         endTurn();
@@ -158,7 +163,7 @@
         if (i < 0) return;
         const sh = { ...S.shapes[i], ...tf(a.s) };
         S.shapes.splice(i, 1);
-        if (a.z === 1) S.shapes.push(sh); else if (a.z === -1) S.shapes.unshift(sh); else S.shapes.splice(i, 0, sh);
+        S.shapes.splice(clamp(a.o == null ? i : a.o | 0, 0, S.shapes.length), 0, sh);
         S.last = { by, kind: 'move', id: sh.id };
         endTurn();
         break;
@@ -187,10 +192,13 @@
     }
     commitState();
   }
+  // 大きさ：マイナスは裏返し（大きさの取っ手を反対側まで引っぱると裏返る）
+  const sgn = (v) => (v < 0 ? -1 : 1);
+  const sz = (v) => sgn(v) * clamp(Math.abs(v), 0.08, 4);
   function tf(s) {
     return {
       x: clamp(+s.x || 0, -20, PW + 20), y: clamp(+s.y || 0, -20, PH + 20), r: +s.r || 0,
-      sx: clamp(+s.sx || 1, 0.08, 4), sy: clamp(+s.sy || 1, 0.08, 4), f: !!s.f,
+      sx: sz((+s.sx || 1) * (s.f ? -1 : 1)), sy: sz(+s.sy || 1),
     };
   }
   function finishRound() {
@@ -261,13 +269,15 @@
   }
   function renderOdai(od) {
     od.innerHTML = '';
-    od.style.gridTemplateColumns = `repeat(${S.parts.length === 4 ? 2 : S.parts.length}, minmax(0, 1fr))`;
+    const n = S.parts.length;
+    od.style.gridTemplateColumns = `repeat(${n <= 3 ? n : n === 4 ? 2 : 3}, minmax(0, 1fr))`;
     for (const p of S.parts) {
-      const vis = App.mode === 'net' ? p.owner === App.role : App.peek === p.owner;
+      const both = p.owner === 'both';
+      const vis = both || (App.mode === 'net' ? p.owner === App.role : App.peek === p.owner);
       const d = document.createElement('div');
-      d.className = 'od' + (vis ? ' mine' : ' hid');
+      d.className = 'od' + (both ? ' both' : vis ? ' mine' : ' hid') + (vis && C.SLOTS[p.slot].show(p.text).length > (n >= 5 ? 7 : 9) ? ' long' : '');
       d.innerHTML = `<div class="l"></div><div class="t"></div>`;
-      d.querySelector('.l').textContent = C.SLOTS[p.slot].label + (App.mode === 'local' && vis ? `（${p.owner}）` : '');
+      d.querySelector('.l').textContent = C.SLOTS[p.slot].label + (both ? '（共通）' : App.mode === 'local' && vis ? `（${p.owner}）` : '');
       d.querySelector('.t').textContent = vis ? C.SLOTS[p.slot].show(p.text) : '？？？？';
       od.appendChild(d);
     }
@@ -302,8 +312,10 @@
     $('pl-palette').classList.toggle('hidden', !!E);
     $('pl-edit').classList.toggle('hidden', !E);
     if (E) {
-      $('ed-front').classList.toggle('on', E.z === 1);
-      $('ed-back').classList.toggle('on', E.z === -1);
+      // いちばん前なら「前へ」は出さない。いちばん後ろなら「後ろへ」は出さない
+      const n = restOf().length;
+      $('ed-front').classList.toggle('hidden', E.o >= n);
+      $('ed-back').classList.toggle('hidden', E.o <= 0);
     }
     renderPalette();
     // 見守り中の表示
@@ -386,44 +398,54 @@
     c.restore();
   }
   // 操作中の図形の、取っ手の位置
-  function handles(s) {
+  // hc：大きさの取っ手を置きたい角（[±1, ±1]。回転だけを戻した向きで）
+  function handles(s, hc) {
     const c = Math.cos(s.r), n = Math.sin(s.r);
     const w = (x, y) => [s.x + x * c - y * n, s.y + x * n + y * c];
-    const hx = 50 * s.sx, hy = 50 * s.sy;
+    const hx = 50 * Math.abs(s.sx), hy = 50 * Math.abs(s.sy);
     let rot = w(0, -hy - 30), top = w(0, -hy);
     if (rot[1] < 14 || rot[0] < 6 || rot[0] > PW - 6) { rot = w(0, hy + 30); top = w(0, hy); } // 画用紙の外に出るときは反対側に
     const corners = [w(-hx, -hy), w(hx, -hy), w(hx, hy), w(-hx, hy)];
     // 大きさの取っ手：ふだんは右下。画用紙の外に出るときは、内側にある別の角を使う
     const inside = (p) => p[0] > 10 && p[0] < PW - 10 && p[1] > 10 && p[1] < PH - 10;
-    const scale = [corners[2], corners[1], corners[3], corners[0]].find(inside) || corners[2];
+    const want = hc ? w(hc[0] * hx, hc[1] * hy) : null;
+    const scale = (want && (inside(want) || (E && E.drag === 'scale')) && want) || [corners[2], corners[1], corners[3], corners[0]].find(inside) || corners[2];
     return { corners, rot, top, scale };
+  }
+  // 重なり順を決めるときの「ほかの図形」（動かしている図形を除いた並び）
+  function restOf() {
+    if (!S) return [];
+    return E && E.mode === 'move' ? S.shapes.filter((x) => x.id !== E.id) : S.shapes;
+  }
+  // 画用紙の上の並び（操作中の図形も、決めた重なり順のところに入れる）
+  function sceneList() {
+    const hideId = (E && E.mode === 'move' ? E.id : null) || (Live && Live.mode === 'move' ? Live.id : null);
+    const list = S.shapes.filter((s) => s.id !== hideId);
+    let cur = null, o = null, alpha = 1;
+    if (E) { cur = E.s; o = E.o; if (E.drag === 'paldrag' && !E.inside) alpha = 0.45; }
+    else if (Live && Live.s) {
+      const base = Live.mode === 'move' ? S.shapes.find((x) => x.id === Live.id) : S.palette[Live.pi];
+      if (base) { cur = { ...base, ...Live.s, k: base.k, c: base.c }; o = Live.o; }
+    }
+    if (cur) list.splice(clamp(o == null ? list.length : o, 0, list.length), 0, { ...cur, _cur: true, _alpha: alpha });
+    return { list, cur: cur && list.find((x) => x._cur) };
   }
   function render() {
     if (!S || !$('scr-play').classList.contains('active')) return;
     const dpr = window.devicePixelRatio || 1, sc = K * dpr;
-    const hideId = (E && E.mode === 'move' ? E.id : null) || (Live && Live.mode === 'move' ? Live.id : null);
-    drawPaper(ctx, sc, S.shapes.filter((s) => s.id !== hideId));
+    const { list, cur } = sceneList();
     ctx.save();
     ctx.setTransform(sc, 0, 0, sc, 0, 0);
-    // 相棒が動かしている途中の図形
-    if (Live && Live.s) {
-      const base = Live.mode === 'move' ? S.shapes.find((x) => x.id === Live.id) : S.palette[Live.pi];
-      if (base) {
-        const s = { ...base, ...Live.s, k: base.k, c: base.c };
-        SH.draw(ctx, s, { alpha: 0.9 });
-        outline(ctx, s, App.role === 'A' ? '#4472c4' : '#f08030', false);
-      }
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, PW, PH);
+    for (const s of list) SH.draw(ctx, s, { alpha: s._cur ? s._alpha : 1 });
+    if (cur) {
+      if (E) { if (E.drag !== 'paldrag') outline(ctx, E.s, '#e04858', true); }
+      else outline(ctx, cur, App.role === 'A' ? '#4472c4' : '#f08030', false); // 相棒が動かしている途中
     }
-    // 自分が操作中の図形と取っ手
-    if (E) {
-      SH.draw(ctx, E.s, { alpha: E.drag === 'paldrag' && !E.inside ? 0.45 : 1 });
-      if (E.drag !== 'paldrag') outline(ctx, E.s, '#e04858', true);
-    }
-    // 直前の1手（相棒が置いた／動かした図形）を少しだけ光らせる
     ctx.restore();
   }
   function outline(c, s, color, withHandles) {
-    const h = handles(s);
+    const h = handles(s, withHandles && E ? E.hc : null);
     c.save();
     c.strokeStyle = color; c.lineWidth = 1.6; c.setLineDash([5, 4]);
     c.beginPath(); h.corners.forEach((p, i) => (i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1]))); c.closePath(); c.stroke();
@@ -456,7 +478,8 @@
     Snd.init();
     const p = S.palette[i];
     const pt = toPaper(e);
-    E = { mode: 'place', pi: i, z: 1, s: { k: p.k, c: p.c, x: pt.x, y: pt.y, r: 0, sx: 0.8, sy: 0.8, f: false }, drag: 'paldrag', sx0: e.clientX, sy0: e.clientY, pid: e.pointerId, inside: false };
+    // 新しい図形は、いちばん前に置く
+    E = { mode: 'place', pi: i, o: S.shapes.length, s: { k: p.k, c: p.c, x: pt.x, y: pt.y, r: 0, sx: 0.8, sy: 0.8 }, drag: 'paldrag', sx0: e.clientX, sy0: e.clientY, pid: e.pointerId, inside: false };
     Snd.play('pick');
     renderUI(); sendLive();
   }
@@ -487,23 +510,34 @@
     if (ptrs.size === 2 && E) { startPinch(); return; }
     if (ptrs.size > 1) return;
     if (E) {
-      const h = handles(E.s);
-      if (near(pt, h.rot, 22)) { E.drag = 'rot'; return; }
-      if (near(pt, h.scale, 22)) { E.drag = 'scale'; return; }
-      if (SH.hit(E.s, pt.x, pt.y, 10)) { E.drag = 'move'; E.ox = pt.x - E.s.x; E.oy = pt.y - E.s.y; return; }
+      const h = handles(E.s, E.hc);
+      if (near(pt, h.rot, 24)) { E.drag = 'rot'; return; }
+      if (near(pt, h.scale, 24)) {
+        // つかんだ角の向きを覚える（反対側まで引っぱったら裏返す）
+        const c = Math.cos(-E.s.r), n = Math.sin(-E.s.r), dx = h.scale[0] - E.s.x, dy = h.scale[1] - E.s.y;
+        E.drag = 'scale';
+        E.sk = { kx: sgn(dx * c - dy * n), ky: sgn(dx * n + dy * c), gx: sgn(E.s.sx), gy: sgn(E.s.sy) };
+        return;
+      }
+      if (SH.hit(E.s, pt.x, pt.y, 16) || inBox(E.s, pt, 6)) { E.drag = 'move'; E.ox = pt.x - E.s.x; E.oy = pt.y - E.s.y; return; }
       return;
     }
     // 置いてある図形をつかむ（いちばん上のもの）
-    for (let i = S.shapes.length - 1; i >= 0; i--) {
-      const s = S.shapes[i];
-      if (SH.hit(s, pt.x, pt.y, 6)) {
-        E = { mode: 'move', id: s.id, z: 0, s: { ...s }, drag: 'move', ox: pt.x - s.x, oy: pt.y - s.y };
-        Snd.play('pick');
-        renderUI(); sendLive();
-        return;
-      }
+    const s = pickAt(pt);
+    if (s) {
+      E = { mode: 'move', id: s.id, o: S.shapes.indexOf(s), s: { ...s }, drag: 'move', ox: pt.x - s.x, oy: pt.y - s.y };
+      Snd.play('pick');
+      renderUI(); sendLive();
     }
   });
+  const inBox = (s, pt, m = 0) => { const b = SH.bbox(s); return pt.x > b[0] - m && pt.x < b[2] + m && pt.y > b[1] - m && pt.y < b[3] + m; };
+  // 指の下の図形：①ぴったり ②少し外れていても（細い線・三日月など） ③輪の穴など、図形の枠の中
+  function pickAt(pt) {
+    const L = S.shapes;
+    for (const pad of [0, 16]) for (let i = L.length - 1; i >= 0; i--) if (SH.hit(L[i], pt.x, pt.y, pad)) return L[i];
+    for (let i = L.length - 1; i >= 0; i--) if (inBox(L[i], pt)) return L[i];
+    return null;
+  }
   cv.addEventListener('pointermove', (e) => {
     if (!ptrs.has(e.pointerId)) return;
     const pt = toPaper(e);
@@ -518,9 +552,12 @@
       if (Math.abs(a - snap) < 0.09) a = snap; // 45°ごとに少し吸いつく
       s.r = a;
     } else if (E.drag === 'scale') {
-      const c = Math.cos(-s.r), n = Math.sin(-s.r), dx = pt.x - s.x, dy = pt.y - s.y;
-      s.sx = clamp(Math.abs(dx * c - dy * n) / 50, 0.1, 4);
-      s.sy = clamp(Math.abs(dx * n + dy * c) / 50, 0.1, 4);
+      // 縦横べつべつ。つかんだ角と反対側まで引っぱると、その向きに裏返る
+      const c = Math.cos(-s.r), n = Math.sin(-s.r), dx = pt.x - s.x, dy = pt.y - s.y, k = E.sk;
+      const vx = ((dx * c - dy * n) * k.kx) / 50, vy = ((dx * n + dy * c) * k.ky) / 50;
+      const lim = (v) => sgn(v) * clamp(Math.abs(v), 0.1, 4);
+      s.sx = k.gx * lim(vx); s.sy = k.gy * lim(vy);
+      E.hc = [k.kx * sgn(vx), k.ky * sgn(vy)];
     } else return;
     sendLive();
   });
@@ -540,20 +577,33 @@
     const [p, q] = [...ptrs.values()];
     const d = Math.hypot(q.x - p.x, q.y - p.y) || 1, a = Math.atan2(q.y - p.y, q.x - p.x);
     const k = d / pinch.d;
-    E.s.sx = clamp(pinch.s.sx * k, 0.1, 4); E.s.sy = clamp(pinch.s.sy * k, 0.1, 4);
+    E.s.sx = sgn(pinch.s.sx) * clamp(Math.abs(pinch.s.sx) * k, 0.1, 4); E.s.sy = sgn(pinch.s.sy) * clamp(Math.abs(pinch.s.sy) * k, 0.1, 4);
     E.s.r = pinch.s.r + (a - pinch.a);
     E.s.x = clamp(pinch.s.x + (p.x + q.x) / 2 - pinch.mx, 0, PW);
     E.s.y = clamp(pinch.s.y + (p.y + q.y) / 2 - pinch.my, 0, PH);
   }
 
   // 操作中のボタン
-  $('ed-flip').addEventListener('click', () => { if (E) { E.s.f = !E.s.f; Snd.play('tap'); sendLive(); } });
-  $('ed-front').addEventListener('click', () => { if (E) { E.z = E.z === 1 ? 0 : 1; Snd.play('tap'); toast(E.z === 1 ? 'いちばん前に置きます' : '重なり順はそのまま'); renderUI(); } });
-  $('ed-back').addEventListener('click', () => { if (E) { E.z = E.z === -1 ? (E.mode === 'place' ? 1 : 0) : -1; Snd.play('tap'); toast(E.z === -1 ? 'いちばん後ろに置きます' : (E.mode === 'place' ? 'いちばん前に置きます' : '重なり順はそのまま')); renderUI(); } });
+  // 前へ／後ろへ：押した瞬間に入れかわる。重なっている図形を1つずつ追いこす（重なりがなければ端まで）
+  $('ed-front').addEventListener('click', () => {
+    if (!E) return;
+    const R = restOf();
+    let o = R.length;
+    for (let j = E.o; j < R.length; j++) if (SH.overlap(R[j], E.s)) { o = j + 1; break; }
+    E.o = o; Snd.play('tap'); sendLive(); renderUI();
+  });
+  $('ed-back').addEventListener('click', () => {
+    if (!E) return;
+    const R = restOf();
+    let o = 0;
+    for (let j = E.o - 1; j >= 0; j--) if (SH.overlap(R[j], E.s)) { o = j; break; }
+    E.o = o; Snd.play('tap'); sendLive(); renderUI();
+  });
+  // やり直す：この手を取り消して、置く前／動かす前に戻す
   $('ed-cancel').addEventListener('click', () => { E = null; Snd.play('tap'); sendLive(); renderUI(); });
   $('ed-ok').addEventListener('click', () => {
     if (!E || !myTurn()) return;
-    const a = E.mode === 'place' ? { kind: 'place', pi: E.pi, z: E.z, s: { ...E.s } } : { kind: 'move', id: E.id, z: E.z, s: { ...E.s } };
+    const a = E.mode === 'place' ? { kind: 'place', pi: E.pi, o: E.o, s: { ...E.s } } : { kind: 'move', id: E.id, o: E.o, s: { ...E.s } };
     E.sent = true; E.drag = null;
     send({ t: 'live', e: null });
     act(a);
@@ -572,7 +622,7 @@
   function sendLive() {
     if (App.mode !== 'net') return;
     const t = now();
-    const go = () => { liveT = now(); send({ t: 'live', e: E ? { mode: E.mode, pi: E.pi, id: E.id, s: E.drag === 'paldrag' && !E.inside ? null : { ...E.s } } : null }); };
+    const go = () => { liveT = now(); send({ t: 'live', e: E ? { mode: E.mode, pi: E.pi, id: E.id, o: E.o, s: E.drag === 'paldrag' && !E.inside ? null : { ...E.s } } : null }); };
     clearTimeout(liveTimer);
     if (t - liveT > 50) go(); else liveTimer = setTimeout(go, 50);
   }
@@ -680,6 +730,14 @@
     const list = $('rv-list');
     list.innerHTML = '';
     for (const p of S.parts) {
+      if (p.owner === 'both') {
+        const d = document.createElement('div');
+        d.className = 'res';
+        d.innerHTML = '<span class="mk both">🤝</span><span><b></b><br><small>ふたり共通のお題</small></span>';
+        d.querySelector('b').textContent = `${C.SLOTS[p.slot].label.replace('？', '')}：${C.SLOTS[p.slot].show(p.text)}`;
+        list.appendChild(d);
+        continue;
+      }
       const g = other(p.owner);
       const qi = S.quiz[g].findIndex((q) => q.slot === p.slot);
       const q = S.quiz[g][qi];
@@ -758,7 +816,7 @@
     $('lb-net').classList.toggle('hidden', !net);
     $('lb-title').textContent = net ? '2台で遊ぶ' : '1台で交代して遊ぶ';
     if (net) {
-      const map = { searching: '相棒を探しています…', waiting: '相棒を待っています…（もう1台でも「2台で遊ぶ」を押してね）', connected: '', reconnecting: 'つなぎ直しています…', idle: '' };
+      const map = { searching: '相棒を探しています…', waiting: '相棒を待っています…<br><small>下の QR を読みとるか、もう1台でも「2台で遊ぶ」を押してね</small>', connected: '', reconnecting: 'つなぎ直しています…', idle: '' };
       st.innerHTML = Link.open ? `<span class="ok">つながりました！</span> あなたは <b>${App.role}</b>` : (map[Link.state] || '');
     } else st.innerHTML = '1台を2人で交代して使います。<br>お題は「長押し」している間だけ見えます。';
     const leader = !net || App.role === 'A';
@@ -776,11 +834,26 @@
       box.appendChild(b);
     }
     $('lb-start').disabled = net && !Link.open;
+    renderQr();
   }
   $('lb-start').addEventListener('click', () => { Snd.init(); Snd.play('tap'); startRound(App.level, 1); });
   $('lb-leave').addEventListener('click', toTitle);
+  // 公開ページ（アプリ）では config.js の URL、確認用サーバー（ポート付き）ではそのページ自身
+  function pageUrl() {
+    const here = location.origin + location.pathname;
+    const dev = location.port !== '' || location.protocol === 'file:';
+    return dev ? here : (CFG.publicUrl || here);
+  }
+  const joinUrl = () => pageUrl() + '?join=1';
+  let qrFor = '';
+  function renderQr() {
+    const show = App.mode === 'net' && !Link.open;
+    $('lb-qr-card').classList.toggle('hidden', !show);
+    if (!show || qrFor === joinUrl()) return;
+    try { window.MiniQR.draw($('lb-qr'), joinUrl(), 210); qrFor = joinUrl(); } catch (e) { $('lb-qr-card').classList.add('hidden'); }
+  }
   $('lb-share').addEventListener('click', async () => {
-    const url = CFG.publicUrl;
+    const url = joinUrl();
     try { if (navigator.share) { await navigator.share({ title: 'ふたりでカタチ', url }); return; } } catch (e) { return; }
     try { await navigator.clipboard.writeText(url); toast('URLをコピーしました'); } catch (e) { prompt('このURLを相棒に送ってください', url); }
   });
@@ -841,6 +914,13 @@
     App.mode = 'local'; App.role = null;
     showScreen('scr-lobby'); renderLobby();
   });
+  // QR／URL から来たとき：「参加する」を出す（音や画面の設定には、1回タップが要るため）
+  if (params.get('join') === '1') {
+    try { const q = new URLSearchParams(location.search); q.delete('join'); history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '')); } catch (e) { /* noop */ }
+    $('invite').classList.remove('hidden');
+  }
+  $('iv-join').addEventListener('click', () => { $('invite').classList.add('hidden'); $('btn-play').click(); });
+  $('iv-no').addEventListener('click', () => $('invite').classList.add('hidden'));
   $('btn-rules').addEventListener('click', () => showScreen('scr-rules'));
   $('btn-rules-back').addEventListener('click', () => showScreen('scr-title'));
   const syncMute = () => { $('btn-mute').textContent = Snd.muted ? '🔇 音なし' : '🔊 音あり'; };
@@ -880,7 +960,7 @@
     window.__kata = {
       App, get S() { return S; }, set S(v) { S = v; }, get E() { return E; }, set E(v) { E = v; },
       get Live() { return Live; }, set Live(v) { Live = v; },
-      applyAct, startRound, newRound, onState, renderUI, render, fit, toLobby, PW, PH,
+      applyAct, startRound, newRound, onState, renderUI, render, fit, toLobby, PW, PH, pickAt, restOf, joinUrl,
       local() { App.mode = 'local'; App.role = null; },
     };
   }

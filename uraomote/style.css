@@ -210,3 +210,8 @@ html.fs { --top-min: 30px; --bottom-min: 12px; } /* 全画面表示中は、シ�
 .life-big .off { opacity: .2; }
 .score { font-size: 30px; color: #ffd84a; }
 .vlabel .enemy-tag { color: #ff6b8a; margin-left: 6px; }
+
+/* 参加用の QR */
+.qr-card canvas { display: block; margin: 4px auto 6px; border-radius: 6px; image-rendering: pixelated; }
+.qr-h { font-size: 15px; font-weight: 800; margin: 2px 0 4px; }
+.qr-note { color: var(--muted); font-size: 13px; margin: 2px 0; line-height: 1.5; }
