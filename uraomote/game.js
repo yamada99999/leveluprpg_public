@@ -379,7 +379,7 @@
     init() {
       if (this.worker !== null) return;
       try {
-        this.worker = new Worker('genworker.js?v=6');
+        this.worker = new Worker('genworker.js?v=7');
         this.worker.onmessage = (e) => { const f = this.waits.get(e.data.id); if (f) { this.waits.delete(e.data.id); f(e.data.r); } };
         this.worker.onerror = () => { this.worker = false; for (const f of this.waits.values()) f(null); this.waits.clear(); };
       } catch (e) { this.worker = false; }
