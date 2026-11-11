@@ -401,19 +401,23 @@
     for (const s of list) SH.draw(c, s);
     c.restore();
   }
+  // 取っ手の大きさ（画用紙の px）。rotR：↻ の丸の半径、sc：□ の一辺、rotGap／scGap：図形からの離れ具合、hit：押せる範囲
+  const HANDLE = { rotR: 20, sc: 32, rotGap: 46, scGap: 16, hit: 34, hitOnShape: 20 };
   // 操作中の図形の、取っ手の位置
   // hc：大きさの取っ手を置きたい角（[±1, ±1]。回転だけを戻した向きで）
   function handles(s, hc) {
     const c = Math.cos(s.r), n = Math.sin(s.r);
     const w = (x, y) => [s.x + x * c - y * n, s.y + x * n + y * c];
     const hx = 50 * Math.abs(s.sx), hy = 50 * Math.abs(s.sy);
-    let rot = w(0, -hy - 30), top = w(0, -hy);
-    if (rot[1] < 14 || rot[0] < 6 || rot[0] > PW - 6) { rot = w(0, hy + 30); top = w(0, hy); } // 画用紙の外に出るときは反対側に
+    // 取っ手は大きめ。図形から少し離して置く（小さい図形を隠さない・押し間違えない）
+    let rot = w(0, -hy - HANDLE.rotGap), top = w(0, -hy);
+    if (rot[1] < HANDLE.rotR + 4 || rot[0] < HANDLE.rotR || rot[0] > PW - HANDLE.rotR) { rot = w(0, hy + HANDLE.rotGap); top = w(0, hy); } // 画用紙の外に出るときは反対側に
     const corners = [w(-hx, -hy), w(hx, -hy), w(hx, hy), w(-hx, hy)];
-    // 大きさの取っ手：ふだんは右下。画用紙の外に出るときは、内側にある別の角を使う
-    const inside = (p) => p[0] > 10 && p[0] < PW - 10 && p[1] > 10 && p[1] < PH - 10;
-    const want = hc ? w(hc[0] * hx, hc[1] * hy) : null;
-    const scale = (want && (inside(want) || (E && E.drag === 'scale')) && want) || [corners[2], corners[1], corners[3], corners[0]].find(inside) || corners[2];
+    // 大きさの取っ手：角から斜め外に少し離す。ふだんは右下。画用紙の外に出るときは、内側にある別の角を使う
+    const G = HANDLE.scGap, at = (sx, sy) => w(sx * (hx + G), sy * (hy + G));
+    const inside = (p) => p[0] > 12 && p[0] < PW - 12 && p[1] > 12 && p[1] < PH - 12;
+    const want = hc ? at(hc[0], hc[1]) : null;
+    const scale = (want && (inside(want) || (E && E.drag === 'scale')) && want) || [at(1, 1), at(1, -1), at(-1, 1), at(-1, -1)].find(inside) || at(1, 1);
     return { corners, rot, top, scale };
   }
   // 重なり順を決めるときの「ほかの図形」（動かしている図形を除いた並び）
@@ -457,11 +461,18 @@
     if (withHandles) {
       c.beginPath(); c.moveTo(h.top[0], h.top[1]); c.lineTo(h.rot[0], h.rot[1]); c.stroke();
       // 回す
-      c.fillStyle = '#fff'; c.beginPath(); c.arc(h.rot[0], h.rot[1], 13, 0, Math.PI * 2); c.fill(); c.stroke();
-      c.fillStyle = color; c.font = 'bold 16px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('↻', h.rot[0], h.rot[1] + 1);
+      c.fillStyle = '#fff'; c.beginPath(); c.arc(h.rot[0], h.rot[1], HANDLE.rotR, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.fillStyle = color; c.font = 'bold 26px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('↻', h.rot[0], h.rot[1] + 1);
       // 大きさ
-      c.fillStyle = '#fff'; c.fillRect(h.scale[0] - 10, h.scale[1] - 10, 20, 20); c.strokeRect(h.scale[0] - 10, h.scale[1] - 10, 20, 20);
-      c.fillStyle = color; c.fillRect(h.scale[0] - 4, h.scale[1] - 4, 8, 8);
+      const q = HANDLE.sc / 2;
+      c.fillStyle = '#fff'; c.fillRect(h.scale[0] - q, h.scale[1] - q, q * 2, q * 2); c.strokeRect(h.scale[0] - q, h.scale[1] - q, q * 2, q * 2);
+      // 中に「斜めの矢印」（伸び縮み）
+      c.save(); c.setLineDash([]); c.strokeStyle = color; c.lineWidth = 2.6; c.lineCap = 'round';
+      const a = q * 0.55, x0 = h.scale[0], y0 = h.scale[1];
+      c.beginPath(); c.moveTo(x0 - a, y0 - a); c.lineTo(x0 + a, y0 + a);
+      c.moveTo(x0 - a, y0 - a + 7); c.lineTo(x0 - a, y0 - a); c.lineTo(x0 - a + 7, y0 - a);
+      c.moveTo(x0 + a, y0 + a - 7); c.lineTo(x0 + a, y0 + a); c.lineTo(x0 + a - 7, y0 + a);
+      c.stroke(); c.restore();
     }
     c.restore();
   }
@@ -526,14 +537,16 @@
       // （小さい図形は取っ手と重なるので、図形の上では取っ手の真ん近くを押したときだけ取っ手にする）
       const h = handles(E.s, E.hc);
       const onShape = SH.hit(E.s, pt.x, pt.y, 0);
-      const lim = onShape ? 12 : 24;
+      const lim = onShape ? HANDLE.hitOnShape : HANDLE.hit;
       const dRot = Math.hypot(pt.x - h.rot[0], pt.y - h.rot[1]), dSc = Math.hypot(pt.x - h.scale[0], pt.y - h.scale[1]);
       if (dRot <= lim && dRot <= dSc) { E.drag = 'rot'; return; }
       if (dSc <= lim) {
         // つかんだ角の向きを覚える（反対側まで引っぱったら裏返す）
         const c = Math.cos(-E.s.r), n = Math.sin(-E.s.r), dx = h.scale[0] - E.s.x, dy = h.scale[1] - E.s.y;
         E.drag = 'scale';
+        const lx = (pt.x - E.s.x) * c - (pt.y - E.s.y) * n, ly = (pt.x - E.s.x) * n + (pt.y - E.s.y) * c;
         E.sk = { kx: sgn(dx * c - dy * n), ky: sgn(dx * n + dy * c), gx: sgn(E.s.sx), gy: sgn(E.s.sy) };
+        E.sk.px = Math.max(8, lx * E.sk.kx); E.sk.py = Math.max(8, ly * E.sk.ky); E.sk.ax = Math.abs(E.s.sx); E.sk.ay = Math.abs(E.s.sy);
         return;
       }
       E.drag = 'move'; E.ox = pt.x - E.s.x; E.oy = pt.y - E.s.y; // 指の動いた分だけ動かす（図形の外をなぞってもOK）
@@ -571,7 +584,7 @@
     } else if (E.drag === 'scale') {
       // 縦横べつべつ。つかんだ角と反対側まで引っぱると、その向きに裏返る
       const c = Math.cos(-s.r), n = Math.sin(-s.r), dx = pt.x - s.x, dy = pt.y - s.y, k = E.sk;
-      const vx = ((dx * c - dy * n) * k.kx) / 50, vy = ((dx * n + dy * c) * k.ky) / 50;
+      const vx = ((dx * c - dy * n) * k.kx) / k.px * k.ax, vy = ((dx * n + dy * c) * k.ky) / k.py * k.ay;
       const lim = (v) => sgn(v) * clamp(Math.abs(v), 0.1, 4);
       s.sx = k.gx * lim(vx); s.sy = k.gy * lim(vy);
       E.hc = [k.kx * sgn(vx), k.ky * sgn(vy)];
